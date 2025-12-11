@@ -912,6 +912,7 @@
             const [peeledBSplines, setPeeledBSplines] = useState(null);
             const [showPeeledGreville, setShowPeeledGreville] = useState(false);
             const [showPeeledElementCounts, setShowPeeledElementCounts] = useState(false);
+            const [showOnlyPeeled, setShowOnlyPeeled] = useState(false);
             const [nestingLevels, setNestingLevels] = useState(null);
             const [selectedNestingLevel, setSelectedNestingLevel] = useState(null);
 
@@ -1104,9 +1105,35 @@
                                 Compute Peeled Set
                             </button>
                             {peeledBSplines && (
-                                <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px' }}>
-                                    Peeled: {peeledBSplines.length} / {mesh.bsplines.length} B-splines
-                                </div>
+                                <>
+                                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px' }}>
+                                        Peeled: {peeledBSplines.length} / {mesh.bsplines.length} B-splines
+                                    </div>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' }}>
+                                        <button
+                                            style={{
+                                                flex: '1',
+                                                minWidth: '80px',
+                                                background: !showOnlyPeeled ? '#333' : '#ccc',
+                                                color: !showOnlyPeeled ? 'white' : '#333'
+                                            }}
+                                            onClick={() => setShowOnlyPeeled(false)}
+                                        >
+                                            All
+                                        </button>
+                                        <button
+                                            style={{
+                                                flex: '1',
+                                                minWidth: '80px',
+                                                background: showOnlyPeeled ? '#ff5722' : '#ccc',
+                                                color: showOnlyPeeled ? 'white' : '#333'
+                                            }}
+                                            onClick={() => setShowOnlyPeeled(true)}
+                                        >
+                                            Peeled Only
+                                        </button>
+                                    </div>
+                                </>
                             )}
                             <button 
                                 onClick={() => {
@@ -1191,8 +1218,15 @@
                             <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
                                 {mesh.bsplines
                                     .filter(bspline => {
-                                        if (selectedNestingLevel === null || !nestingLevels) return true;
-                                        return nestingLevels.get(bspline.id) === selectedNestingLevel;
+                                        // Apply nesting level filter
+                                        if (selectedNestingLevel !== null && nestingLevels) {
+                                            if (nestingLevels.get(bspline.id) !== selectedNestingLevel) return false;
+                                        }
+                                        // Apply peeling filter
+                                        if (showOnlyPeeled && peeledBSplines) {
+                                            if (!peeledBSplines.includes(bspline)) return false;
+                                        }
+                                        return true;
                                     })
                                     .map((bspline, index) => {
                                         const level = nestingLevels ? nestingLevels.get(bspline.id) : null;
@@ -1241,6 +1275,7 @@
                             peeledBSplines={peeledBSplines}
                             showPeeledGreville={showPeeledGreville}
                             showPeeledElementCounts={showPeeledElementCounts}
+                            showOnlyPeeled={showOnlyPeeled}
                             nestingLevels={nestingLevels}
                             selectedNestingLevel={selectedNestingLevel}
                             onPointClick={handlePointClick}
@@ -1457,6 +1492,7 @@
             peeledBSplines,
             showPeeledGreville,
             showPeeledElementCounts,
+            showOnlyPeeled,
             nestingLevels,
             selectedNestingLevel,
             onPointClick,
@@ -1483,8 +1519,15 @@
             const renderBSplineSupports = () => {
                 return mesh.bsplines
                     .filter(bspline => {
-                        if (selectedNestingLevel === null || !nestingLevels) return true;
-                        return nestingLevels.get(bspline.id) === selectedNestingLevel;
+                        // Apply nesting level filter
+                        if (selectedNestingLevel !== null && nestingLevels) {
+                            if (nestingLevels.get(bspline.id) !== selectedNestingLevel) return false;
+                        }
+                        // Apply peeling filter
+                        if (showOnlyPeeled && peeledBSplines) {
+                            if (!peeledBSplines.includes(bspline)) return false;
+                        }
+                        return true;
                     })
                     .map(bspline => {
                         const support = bspline.getSupport();
@@ -1505,7 +1548,7 @@
                                 width={w}
                                 height={h}
                                 fill={isSelected ? (levelColor || "#007acc") : "#e0e0e0"}
-                                fillOpacity={isSelected ? "0.3" : "0.15"}
+                                fillOpacity={isSelected ? "0.3" : "0"}
                                 stroke={isSelected ? (levelColor || "#007acc") : "#999"}
                                 strokeWidth={isSelected ? "2" : "1"}
                                 strokeDasharray={isSelected ? "none" : "3,3"}
