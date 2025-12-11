@@ -287,9 +287,23 @@
                 }
             }
 
+            // Create initial elements (rectangular grid)
+            const elements = [];
+            for (let i = 0; i < numElementsU; i++) {
+                for (let j = 0; j < numElementsV; j++) {
+                    elements.push({
+                        uMin: knotsU[i],
+                        uMax: knotsU[i + 1],
+                        vMin: knotsV[j],
+                        vMax: knotsV[j + 1]
+                    });
+                }
+            }
+
             return {
                 meshlines,
                 bsplines,
+                elements,
                 degreeU,
                 degreeV,
                 nextId,
@@ -803,6 +817,57 @@
             // from left/right or top/bottom creates identical B-splines
             newMesh.bsplines = removeDuplicateBSplines(allBSplines);
             
+            // Split elements that are traversed by the new meshline
+            const newElements = [];
+            for (const element of mesh.elements) {
+                if (direction === 'horizontal') {
+                    // Horizontal line splits element if it passes through its interior
+                    if (constant > element.vMin + epsilon && 
+                        constant < element.vMax - epsilon &&
+                        mergedLine.start <= element.uMin + epsilon &&
+                        mergedLine.end >= element.uMax - epsilon) {
+                        // Split into two elements
+                        newElements.push({
+                            uMin: element.uMin,
+                            uMax: element.uMax,
+                            vMin: element.vMin,
+                            vMax: constant
+                        });
+                        newElements.push({
+                            uMin: element.uMin,
+                            uMax: element.uMax,
+                            vMin: constant,
+                            vMax: element.vMax
+                        });
+                    } else {
+                        newElements.push(element);
+                    }
+                } else {
+                    // Vertical line splits element if it passes through its interior
+                    if (constant > element.uMin + epsilon && 
+                        constant < element.uMax - epsilon &&
+                        mergedLine.start <= element.vMin + epsilon &&
+                        mergedLine.end >= element.vMax - epsilon) {
+                        // Split into two elements
+                        newElements.push({
+                            uMin: element.uMin,
+                            uMax: constant,
+                            vMin: element.vMin,
+                            vMax: element.vMax
+                        });
+                        newElements.push({
+                            uMin: constant,
+                            uMax: element.uMax,
+                            vMin: element.vMin,
+                            vMax: element.vMax
+                        });
+                    } else {
+                        newElements.push(element);
+                    }
+                }
+            }
+            newMesh.elements = newElements;
+            
             // Sort B-splines lexicographically by knot vectors (v first, then u)
             newMesh.bsplines.sort((a, b) => {
                 const epsilon = 1e-10;
@@ -843,6 +908,10 @@
             const [showGreville, setShowGreville] = useState(true);
             const [showRefinementPoints, setShowRefinementPoints] = useState(true);
             const [showResetConfig, setShowResetConfig] = useState(false);
+            const [showElementCounts, setShowElementCounts] = useState(false);
+            const [peeledBSplines, setPeeledBSplines] = useState(null);
+            const [showPeeledGreville, setShowPeeledGreville] = useState(false);
+            const [showPeeledElementCounts, setShowPeeledElementCounts] = useState(false);
 
             // Ensure numElements >= degree+1
             const minElementsU = degreeU + 1;
@@ -876,6 +945,13 @@
                 setRefinementStart(null);
                 setSelectedBSpline(null);
                 setShowResetConfig(false);
+                setPeeledBSplines(null);
+            };
+
+            // Compute peeled set
+            const handleComputePeeled = () => {
+                const peeled = computePeeledSet(mesh.bsplines, mesh.elements);
+                setPeeledBSplines(peeled);
             };
 
             // Handle clicking on a point
@@ -897,6 +973,7 @@
                     }
                     setRefinementStart(null);
                     setSelectedBSpline(null);
+                    setPeeledBSplines(null); // Clear peeled set when mesh changes
                 }
             };
 
@@ -978,11 +1055,66 @@
                                     Clear Selection
                                 </button>
                             )}
-                            <button onClick={() => setShowGreville(!showGreville)}>
+                            <button onClick={() => {
+                                setShowGreville(!showGreville);
+                                if (!showGreville) {
+                                    setShowElementCounts(false);
+                                    setShowPeeledGreville(false);
+                                    setShowPeeledElementCounts(false);
+                                }
+                            }}>
                                 {showGreville ? 'Hide' : 'Show'} Greville Points
                             </button>
                             <button onClick={() => setShowRefinementPoints(!showRefinementPoints)}>
                                 {showRefinementPoints ? 'Hide' : 'Show'} Refinement Points
+                            </button>
+                            <button onClick={() => {
+                                setShowElementCounts(!showElementCounts);
+                                if (!showElementCounts) {
+                                    setShowGreville(false);
+                                    setShowPeeledGreville(false);
+                                    setShowPeeledElementCounts(false);
+                                }
+                            }}>
+                                {showElementCounts ? 'Hide' : 'Show'} Element Counts
+                            </button>
+                        </div>
+
+                        <div className="control-group">
+                            <label>Peeling:</label>
+                            <button onClick={handleComputePeeled}>
+                                Compute Peeled Set
+                            </button>
+                            {peeledBSplines && (
+                                <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px' }}>
+                                    Peeled: {peeledBSplines.length} / {mesh.bsplines.length} B-splines
+                                </div>
+                            )}
+                            <button 
+                                onClick={() => {
+                                    setShowPeeledGreville(!showPeeledGreville);
+                                    if (!showPeeledGreville) {
+                                        setShowGreville(false);
+                                        setShowElementCounts(false);
+                                        setShowPeeledElementCounts(false);
+                                    }
+                                }}
+                                disabled={!peeledBSplines}
+                            >
+                                {showPeeledGreville ? 'Hide' : 'Show'} Peeled Greville
+                            </button>
+                            <button 
+                                onClick={() => {
+                                    setShowPeeledElementCounts(!showPeeledElementCounts);
+                                    if (!showPeeledElementCounts) {
+                                        setShowGreville(false);
+                                        setShowElementCounts(false);
+                                        setShowPeeledGreville(false);
+                                    }
+                                }}
+                                disabled={!peeledBSplines}
+                            >
+                                {showPeeledElementCounts ? 'Hide' : 'Show'} Peeled Element Counts
                             </button>
                         </div>
 
@@ -1024,6 +1156,10 @@
                             selectedBSpline={selectedBSpline}
                             showGreville={showGreville}
                             showRefinementPoints={showRefinementPoints}
+                            showElementCounts={showElementCounts}
+                            peeledBSplines={peeledBSplines}
+                            showPeeledGreville={showPeeledGreville}
+                            showPeeledElementCounts={showPeeledElementCounts}
                             onPointClick={handlePointClick}
                             onGrevilleClick={setSelectedBSpline}
                         />
@@ -1031,6 +1167,111 @@
                 </div>
             );
         }
+
+        /**
+         * Elements are now maintained as part of the mesh structure
+         * and split during refinement, so we just return them directly
+         */
+        const getElements = (mesh) => {
+            return mesh.elements;
+        };
+
+        /**
+         * Count B-splines in each element
+         */
+        const countBSplinesInElements = (mesh, elements) => {
+            const epsilon = 1e-10;
+            return elements.map(element => {
+                let count = 0;
+                for (const bspline of mesh.bsplines) {
+                    const support = bspline.getSupport();
+                    // Check if element is contained in B-spline support
+                    if (support.uMin <= element.uMin + epsilon &&
+                        support.uMax >= element.uMax - epsilon &&
+                        support.vMin <= element.vMin + epsilon &&
+                        support.vMax >= element.vMax - epsilon) {
+                        count++;
+                    }
+                }
+                return { ...element, count };
+            });
+        };
+
+        /**
+         * Count B-splines from a specific set covering each element
+         */
+        const countBSplinesInElementsFromSet = (bsplines, elements) => {
+            const epsilon = 1e-10;
+            return elements.map(element => {
+                let count = 0;
+                for (const bspline of bsplines) {
+                    const support = bspline.getSupport();
+                    // Check if element is contained in B-spline support
+                    if (support.uMin <= element.uMin + epsilon &&
+                        support.uMax >= element.uMax - epsilon &&
+                        support.vMin <= element.vMin + epsilon &&
+                        support.vMax >= element.vMax - epsilon) {
+                        count++;
+                    }
+                }
+                return { ...element, count };
+            });
+        };
+
+        /**
+         * Get B-splines covering an element
+         */
+        const getBSplinesCoveringElement = (bsplines, element) => {
+            const epsilon = 1e-10;
+            return bsplines.filter(bspline => {
+                const support = bspline.getSupport();
+                return support.uMin <= element.uMin + epsilon &&
+                       support.uMax >= element.uMax - epsilon &&
+                       support.vMin <= element.vMin + epsilon &&
+                       support.vMax >= element.vMax - epsilon;
+            });
+        };
+
+        /**
+         * Peeling Algorithm
+         * Input: A collection of LR B-splines
+         * Output: The peeled collection (B-splines that remain after removing
+         *         all B-splines that at some point were the only ones covering an element)
+         */
+        const computePeeledSet = (bsplines, elements) => {
+            // Initialize the peeled set with all B-splines
+            let peeledSet = [...bsplines];
+            
+            // Identify all non-overloaded elements (covered by only 1 B-spline)
+            // and collect B-splines covering at least one such element
+            let tempSet = new Set();
+            
+            const findBSplinesToRemove = (currentBSplines) => {
+                const toRemove = new Set();
+                for (const element of elements) {
+                    const covering = getBSplinesCoveringElement(currentBSplines, element);
+                    if (covering.length === 1) {
+                        // This element is covered by only one B-spline - mark it for removal
+                        toRemove.add(covering[0]);
+                    }
+                }
+                return toRemove;
+            };
+            
+            // Initial identification
+            tempSet = findBSplinesToRemove(peeledSet);
+            
+            // Iteratively remove B-splines
+            while (tempSet.size > 0) {
+                // Remove identified B-splines from peeled set
+                peeledSet = peeledSet.filter(b => !tempSet.has(b));
+                
+                // Find new B-splines to remove (elements now covered by only 1)
+                tempSet = findBSplinesToRemove(peeledSet);
+            }
+            
+            return peeledSet;
+        };
 
         /**
          * Mesh Visualization Component
@@ -1043,6 +1284,10 @@
             selectedBSpline,
             showGreville,
             showRefinementPoints,
+            showElementCounts,
+            peeledBSplines,
+            showPeeledGreville,
+            showPeeledElementCounts,
             onPointClick,
             onGrevilleClick
         }) {
@@ -1053,6 +1298,15 @@
 
             const toSVGX = (u) => margin + u * scale;
             const toSVGY = (v) => margin + (1 - v) * scale;
+            
+            // Get elements and compute their B-spline counts
+            const elements = getElements(mesh);
+            const elementCounts = countBSplinesInElements(mesh, elements);
+            
+            // Compute peeled element counts if needed
+            const peeledElementCounts = peeledBSplines 
+                ? countBSplinesInElementsFromSet(peeledBSplines, elements)
+                : null;
 
             // Render B-spline supports
             const renderBSplineSupports = () => {
@@ -1221,6 +1475,82 @@
                 });
             };
 
+            // Render element counts
+            const renderElementCounts = () => {
+                if (!showElementCounts) return null;
+                
+                return elementCounts.map((element, idx) => {
+                    const centerU = (element.uMin + element.uMax) / 2;
+                    const centerV = (element.vMin + element.vMax) / 2;
+                    
+                    return (
+                        <text
+                            key={`count-${idx}`}
+                            x={toSVGX(centerU)}
+                            y={toSVGY(centerV)}
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                            fontSize="16"
+                            fontWeight="bold"
+                            fill="#333"
+                            style={{ pointerEvents: 'none', userSelect: 'none' }}
+                        >
+                            {element.count}
+                        </text>
+                    );
+                });
+            };
+
+            // Render peeled Greville points
+            const renderPeeledGrevillePoints = () => {
+                if (!showPeeledGreville || !peeledBSplines) return null;
+                
+                return peeledBSplines.map(bspline => {
+                    const greville = bspline.getGrevillePoint();
+                    const isSelected = selectedBSpline === bspline.id;
+                    
+                    return (
+                        <circle
+                            key={`peeled-greville-${bspline.id}`}
+                            cx={toSVGX(greville.u)}
+                            cy={toSVGY(greville.v)}
+                            r="5"
+                            fill={isSelected ? "#ff6b6b" : "#9c27b0"}
+                            stroke="white"
+                            strokeWidth="2"
+                            cursor="pointer"
+                            onClick={() => onGrevilleClick(bspline.id)}
+                        />
+                    );
+                });
+            };
+
+            // Render peeled element counts
+            const renderPeeledElementCounts = () => {
+                if (!showPeeledElementCounts || !peeledElementCounts) return null;
+                
+                return peeledElementCounts.map((element, idx) => {
+                    const centerU = (element.uMin + element.uMax) / 2;
+                    const centerV = (element.vMin + element.vMax) / 2;
+                    
+                    return (
+                        <text
+                            key={`peeled-count-${idx}`}
+                            x={toSVGX(centerU)}
+                            y={toSVGY(centerV)}
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                            fontSize="16"
+                            fontWeight="bold"
+                            fill="#9c27b0"
+                            style={{ pointerEvents: 'none', userSelect: 'none' }}
+                        >
+                            {element.count}
+                        </text>
+                    );
+                });
+            };
+
             return (
                 <svg width={width} height={height}>
                     {/* Background */}
@@ -1248,6 +1578,15 @@
 
                     {/* Greville points (render on top when visible) */}
                     {renderGrevillePoints()}
+
+                    {/* Element counts */}
+                    {renderElementCounts()}
+
+                    {/* Peeled Greville points */}
+                    {renderPeeledGrevillePoints()}
+
+                    {/* Peeled element counts */}
+                    {renderPeeledElementCounts()}
 
                     {/* Axis labels */}
                     <text x={width/2} y={height - 10} textAnchor="middle" fontSize="14" fill="#666">u</text>
