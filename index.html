@@ -912,6 +912,8 @@
             const [peeledBSplines, setPeeledBSplines] = useState(null);
             const [showPeeledGreville, setShowPeeledGreville] = useState(false);
             const [showPeeledElementCounts, setShowPeeledElementCounts] = useState(false);
+            const [nestingLevels, setNestingLevels] = useState(null);
+            const [selectedNestingLevel, setSelectedNestingLevel] = useState(null);
 
             // Ensure numElements >= degree+1
             const minElementsU = degreeU + 1;
@@ -946,6 +948,8 @@
                 setSelectedBSpline(null);
                 setShowResetConfig(false);
                 setPeeledBSplines(null);
+                setNestingLevels(null);
+                setSelectedNestingLevel(null);
             };
 
             // Compute peeled set
@@ -953,6 +957,18 @@
                 const peeled = computePeeledSet(mesh.bsplines, mesh.elements);
                 setPeeledBSplines(peeled);
             };
+
+            // Compute nesting levels
+            const handleComputeNestingLevels = () => {
+                const levels = computeNestingLevels(mesh.bsplines);
+                setNestingLevels(levels);
+                setSelectedNestingLevel(null);
+            };
+
+            // Get max nesting level
+            const maxNestingLevel = nestingLevels 
+                ? Math.max(...nestingLevels.values())
+                : 0;
 
             // Handle clicking on a point
             const handlePointClick = (point) => {
@@ -974,6 +990,8 @@
                     setRefinementStart(null);
                     setSelectedBSpline(null);
                     setPeeledBSplines(null); // Clear peeled set when mesh changes
+                    setNestingLevels(null);
+                    setSelectedNestingLevel(null);
                 }
             };
 
@@ -1119,6 +1137,48 @@
                         </div>
 
                         <div className="control-group">
+                            <label>Nesting Levels:</label>
+                            <button onClick={handleComputeNestingLevels}>
+                                Compute Nesting Levels
+                            </button>
+                            {nestingLevels && (
+                                <>
+                                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px' }}>
+                                        Max level: {maxNestingLevel}
+                                    </div>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' }}>
+                                        <button
+                                            style={{
+                                                flex: '1',
+                                                minWidth: '60px',
+                                                background: selectedNestingLevel === null ? '#333' : '#ccc',
+                                                color: selectedNestingLevel === null ? 'white' : '#333'
+                                            }}
+                                            onClick={() => setSelectedNestingLevel(null)}
+                                        >
+                                            All
+                                        </button>
+                                        {Array.from({ length: maxNestingLevel + 1 }, (_, i) => (
+                                            <button
+                                                key={i}
+                                                style={{
+                                                    flex: '1',
+                                                    minWidth: '40px',
+                                                    background: selectedNestingLevel === i ? getNestingColor(i) : '#eee',
+                                                    color: selectedNestingLevel === i ? 'white' : getNestingColor(i),
+                                                    border: `2px solid ${getNestingColor(i)}`
+                                                }}
+                                                onClick={() => setSelectedNestingLevel(selectedNestingLevel === i ? null : i)}
+                                            >
+                                                {i}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        <div className="control-group">
                             <label>Statistics:</label>
                             <div style={{ fontSize: '14px', color: '#666' }}>
                                 Meshlines: {mesh.meshlines.length}<br />
@@ -1129,20 +1189,41 @@
                         <div className="control-group">
                             <label>B-splines (click to highlight):</label>
                             <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
-                                {mesh.bsplines.map((bspline, index) => {
-                                    return (
-                                        <div
-                                            key={bspline.id}
-                                            className={`bspline-item ${selectedBSpline === bspline.id ? 'selected' : ''}`}
-                                            onClick={() => setSelectedBSpline(
-                                                selectedBSpline === bspline.id ? null : bspline.id
-                                            )}
-                                        >
-                                            u: [{bspline.knotsU.map(k => k.toFixed(2)).join(', ')}]<br />
-                                            v: [{bspline.knotsV.map(k => k.toFixed(2)).join(', ')}]
-                                        </div>
-                                    );
-                                })}
+                                {mesh.bsplines
+                                    .filter(bspline => {
+                                        if (selectedNestingLevel === null || !nestingLevels) return true;
+                                        return nestingLevels.get(bspline.id) === selectedNestingLevel;
+                                    })
+                                    .map((bspline, index) => {
+                                        const level = nestingLevels ? nestingLevels.get(bspline.id) : null;
+                                        const levelColor = level !== null ? getNestingColor(level) : null;
+                                        return (
+                                            <div
+                                                key={bspline.id}
+                                                className={`bspline-item ${selectedBSpline === bspline.id ? 'selected' : ''}`}
+                                                style={{
+                                                    borderLeftColor: levelColor || 'transparent',
+                                                    borderLeftWidth: levelColor ? '4px' : '2px',
+                                                    borderLeftStyle: 'solid'
+                                                }}
+                                                onClick={() => setSelectedBSpline(
+                                                    selectedBSpline === bspline.id ? null : bspline.id
+                                                )}
+                                            >
+                                                {level !== null && (
+                                                    <span style={{ 
+                                                        color: levelColor, 
+                                                        fontWeight: 'bold',
+                                                        marginRight: '5px'
+                                                    }}>
+                                                        L{level}
+                                                    </span>
+                                                )}
+                                                u: [{bspline.knotsU.map(k => k.toFixed(2)).join(', ')}]<br />
+                                                v: [{bspline.knotsV.map(k => k.toFixed(2)).join(', ')}]
+                                            </div>
+                                        );
+                                    })}
                             </div>
                         </div>
                     </div>
@@ -1160,6 +1241,8 @@
                             peeledBSplines={peeledBSplines}
                             showPeeledGreville={showPeeledGreville}
                             showPeeledElementCounts={showPeeledElementCounts}
+                            nestingLevels={nestingLevels}
+                            selectedNestingLevel={selectedNestingLevel}
                             onPointClick={handlePointClick}
                             onGrevilleClick={setSelectedBSpline}
                         />
@@ -1274,6 +1357,92 @@
         };
 
         /**
+         * Check if support A is strictly nested inside support B
+         * (A is contained in B but A != B)
+         */
+        const isNestedInside = (supportA, supportB) => {
+            const epsilon = 1e-10;
+            // A is nested inside B if B contains A and they are not equal
+            const bContainsA = supportB.uMin <= supportA.uMin + epsilon &&
+                              supportB.uMax >= supportA.uMax - epsilon &&
+                              supportB.vMin <= supportA.vMin + epsilon &&
+                              supportB.vMax >= supportA.vMax - epsilon;
+            
+            if (!bContainsA) return false;
+            
+            // Check if they are not equal (A is strictly smaller)
+            const areEqual = Math.abs(supportA.uMin - supportB.uMin) < epsilon &&
+                            Math.abs(supportA.uMax - supportB.uMax) < epsilon &&
+                            Math.abs(supportA.vMin - supportB.vMin) < epsilon &&
+                            Math.abs(supportA.vMax - supportB.vMax) < epsilon;
+            
+            return !areEqual;
+        };
+
+        /**
+         * Nesting Level Structuring Algorithm
+         * Input: A collection of B-splines
+         * Output: Map from B-spline id to nesting level
+         */
+        const computeNestingLevels = (bsplines) => {
+            const nestingLevels = new Map();
+            let tempSet = [...bsplines];
+            let level = 0;
+            
+            while (tempSet.length > 0) {
+                // Find B-splines whose supports are not nested inside any other in tempSet
+                const levelBSplines = [];
+                
+                for (const bspline of tempSet) {
+                    const support = bspline.getSupport();
+                    let isNested = false;
+                    
+                    // Check if this B-spline's support is nested inside any other
+                    for (const other of tempSet) {
+                        if (bspline === other) continue;
+                        const otherSupport = other.getSupport();
+                        
+                        if (isNestedInside(support, otherSupport)) {
+                            isNested = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!isNested) {
+                        levelBSplines.push(bspline);
+                    }
+                }
+                
+                // Assign nesting level to these B-splines
+                for (const bspline of levelBSplines) {
+                    nestingLevels.set(bspline.id, level);
+                }
+                
+                // Remove from temp set
+                tempSet = tempSet.filter(b => !levelBSplines.includes(b));
+                level++;
+            }
+            
+            return nestingLevels;
+        };
+
+        // Colors for different nesting levels
+        const NESTING_COLORS = [
+            '#28a745', // Level 0 - Green
+            '#007acc', // Level 1 - Blue
+            '#fd7e14', // Level 2 - Orange
+            '#dc3545', // Level 3 - Red
+            '#9c27b0', // Level 4 - Purple
+            '#00bcd4', // Level 5 - Cyan
+            '#795548', // Level 6 - Brown
+            '#607d8b', // Level 7 - Blue Grey
+        ];
+
+        const getNestingColor = (level) => {
+            return NESTING_COLORS[level % NESTING_COLORS.length];
+        };
+
+        /**
          * Mesh Visualization Component
          */
         function MeshVisualization({ 
@@ -1288,6 +1457,8 @@
             peeledBSplines,
             showPeeledGreville,
             showPeeledElementCounts,
+            nestingLevels,
+            selectedNestingLevel,
             onPointClick,
             onGrevilleClick
         }) {
@@ -1310,30 +1481,37 @@
 
             // Render B-spline supports
             const renderBSplineSupports = () => {
-                return mesh.bsplines.map(bspline => {
-                    const support = bspline.getSupport();
-                    const x = toSVGX(support.uMin);
-                    const y = toSVGY(support.vMax);
-                    const w = (support.uMax - support.uMin) * scale;
-                    const h = (support.vMax - support.vMin) * scale;
-                    
-                    const isSelected = selectedBSpline === bspline.id;
-                    
-                    return (
-                        <rect
-                            key={bspline.id}
-                            x={x}
-                            y={y}
-                            width={w}
-                            height={h}
-                            fill={isSelected ? "#007acc" : "#e0e0e0"}
-                            fillOpacity={isSelected ? "0.3" : "0.15"}
-                            stroke={isSelected ? "#007acc" : "#999"}
-                            strokeWidth={isSelected ? "2" : "1"}
-                            strokeDasharray={isSelected ? "none" : "3,3"}
-                        />
-                    );
-                });
+                return mesh.bsplines
+                    .filter(bspline => {
+                        if (selectedNestingLevel === null || !nestingLevels) return true;
+                        return nestingLevels.get(bspline.id) === selectedNestingLevel;
+                    })
+                    .map(bspline => {
+                        const support = bspline.getSupport();
+                        const x = toSVGX(support.uMin);
+                        const y = toSVGY(support.vMax);
+                        const w = (support.uMax - support.uMin) * scale;
+                        const h = (support.vMax - support.vMin) * scale;
+                        
+                        const isSelected = selectedBSpline === bspline.id;
+                        const level = nestingLevels ? nestingLevels.get(bspline.id) : null;
+                        const levelColor = level !== null ? getNestingColor(level) : null;
+                        
+                        return (
+                            <rect
+                                key={bspline.id}
+                                x={x}
+                                y={y}
+                                width={w}
+                                height={h}
+                                fill={isSelected ? (levelColor || "#007acc") : "#e0e0e0"}
+                                fillOpacity={isSelected ? "0.3" : "0.15"}
+                                stroke={isSelected ? (levelColor || "#007acc") : "#999"}
+                                strokeWidth={isSelected ? "2" : "1"}
+                                strokeDasharray={isSelected ? "none" : "3,3"}
+                            />
+                        );
+                    });
             };
 
             // Render meshlines
@@ -1455,24 +1633,31 @@
             const renderGrevillePoints = () => {
                 if (!showGreville) return null;
                 
-                return mesh.bsplines.map(bspline => {
-                    const greville = bspline.getGrevillePoint();
-                    const isSelected = selectedBSpline === bspline.id;
-                    
-                    return (
-                        <circle
-                            key={`greville-${bspline.id}`}
-                            cx={toSVGX(greville.u)}
-                            cy={toSVGY(greville.v)}
-                            r="5"
-                            fill={isSelected ? "#ff6b6b" : "#28a745"}
-                            stroke="white"
-                            strokeWidth="2"
-                            cursor="pointer"
-                            onClick={() => onGrevilleClick(bspline.id)}
-                        />
-                    );
-                });
+                return mesh.bsplines
+                    .filter(bspline => {
+                        if (selectedNestingLevel === null || !nestingLevels) return true;
+                        return nestingLevels.get(bspline.id) === selectedNestingLevel;
+                    })
+                    .map(bspline => {
+                        const greville = bspline.getGrevillePoint();
+                        const isSelected = selectedBSpline === bspline.id;
+                        const level = nestingLevels ? nestingLevels.get(bspline.id) : null;
+                        const levelColor = level !== null ? getNestingColor(level) : "#28a745";
+                        
+                        return (
+                            <circle
+                                key={`greville-${bspline.id}`}
+                                cx={toSVGX(greville.u)}
+                                cy={toSVGY(greville.v)}
+                                r="5"
+                                fill={isSelected ? "#ff6b6b" : levelColor}
+                                stroke="white"
+                                strokeWidth="2"
+                                cursor="pointer"
+                                onClick={() => onGrevilleClick(bspline.id)}
+                            />
+                        );
+                    });
             };
 
             // Render element counts
