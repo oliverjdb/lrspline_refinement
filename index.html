@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LR B-Spline Refinement Visualization (Single Start)</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .controls {
+            width: 300px;
+            background: white;
+            padding: 20px;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            overflow-y: auto;
+        }
+        .visualization {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        h2 {
+            margin-top: 0;
+            color: #333;
+        }
+        .control-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #666;
+            font-weight: 500;
+        }
+        input, select, button {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #007acc;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #005a9e;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        svg {
+            border: 1px solid #ddd;
+            background: white;
+        }
+        .info {
+            background: #e3f2fd;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 14px;
+            color: #1976d2;
+            margin-bottom: 20px;
+        }
+        .bspline-item {
+            padding: 5px;
+            margin: 2px 0;
+            border-radius: 3px;
+            font-size: 12px;
+            cursor: pointer;
+            border: 2px solid transparent;
+        }
+        .bspline-item:hover {
+            background: #f0f0f0;
+        }
+        .bspline-item.selected {
+            border-color: #007acc;
+            background: #e3f2fd;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        let nextBSplineId = 0;
+        const generateBSplineId = () => nextBSplineId++;
+        const resetBSplineIdCounter = () => { nextBSplineId = 0; };
+
+        /**
+         * LRBSpline class - represents a single LR B-spline
+         * Knot vectors have distinct values (no multiplicity)
+         */
+        class LRBSpline {
+            constructor(knotsU, knotsV, id = null) {
+                this.id = id !== null ? id : generateBSplineId();
+                this.knotsU = [...knotsU];
+                this.knotsV = [...knotsV];
+            }
+
+            /**
+             * Get the support of this B-spline
+             */
+            getSupport() {
+                return {
+                    uMin: this.knotsU[0],
+                    uMax: this.knotsU[this.knotsU.length - 1],
+                    vMin: this.knotsV[0],
+                    vMax: this.knotsV[this.knotsV.length - 1]
+                };
+            }
+
+            /**
+             * Calculate the Greville point (average of interior knots)
+             * For degree p with p+2 knots, Greville point is average of middle p knots
+             */
+            getGrevillePoint() {
+                const degreeU = this.knotsU.length - 2;
+                const degreeV = this.knotsV.length - 2;
+                
+                // Average of interior knots (exclude first and last)
+                let u = 0;
+                for (let i = 1; i <= degreeU; i++) {
+                    u += this.knotsU[i];
+                }
+                u /= degreeU;
+                
+                let v = 0;
+                for (let i = 1; i <= degreeV; i++) {
+                    v += this.knotsV[i];
+                }
+                v /= degreeV;
+                
+                return { u, v };
+            }
+
+            /**
+             * Check if a horizontal meshline fully traverses this B-spline's support
+             * The meshline must pass through the interior (not on boundary) and
+             * span the entire width
+             */
+            isFullyTraversedByHorizontal(v, uStart, uEnd) {
+                const support = this.getSupport();
+                const epsilon = 1e-10;
+                
+                // Check if v is in the interior of the v-support
+                if (v <= support.vMin + epsilon || v >= support.vMax - epsilon) {
+                    return false;
+                }
+                
+                // Check if the horizontal line spans the entire u-support
+                return uStart <= support.uMin + epsilon && uEnd >= support.uMax - epsilon;
+            }
+
+            /**
+             * Check if a vertical meshline fully traverses this B-spline's support
+             */
+            isFullyTraversedByVertical(u, vStart, vEnd) {
+                const support = this.getSupport();
+                const epsilon = 1e-10;
+                
+                // Check if u is in the interior of the u-support
+                if (u <= support.uMin + epsilon || u >= support.uMax - epsilon) {
+                    return false;
+                }
+                
+                // Check if the vertical line spans the entire v-support
+                return vStart <= support.vMin + epsilon && vEnd >= support.vMax - epsilon;
+            }
+
+            splitU(newKnot) {
+                const epsilon = 1e-10;
+                const degreeU = this.knotsU.length - 2;
+                
+                const newKnotsU = [...this.knotsU];
+                let insertIdx = newKnotsU.findIndex(k => k > newKnot - epsilon);
+                if (insertIdx === -1) insertIdx = newKnotsU.length;
+                newKnotsU.splice(insertIdx, 0, newKnot);
+                
+                const bspline1 = new LRBSpline(
+                    newKnotsU.slice(0, degreeU + 2),
+                    this.knotsV
+                );
+                const bspline2 = new LRBSpline(
+                    newKnotsU.slice(1, degreeU + 3),
+                    this.knotsV
+                );
+                
+                return [bspline1, bspline2];
+            }
+
+            splitV(newKnot) {
+                const epsilon = 1e-10;
+                const degreeV = this.knotsV.length - 2;
+                
+                const newKnotsV = [...this.knotsV];
+                let insertIdx = newKnotsV.findIndex(k => k > newKnot - epsilon);
+                if (insertIdx === -1) insertIdx = newKnotsV.length;
+                newKnotsV.splice(insertIdx, 0, newKnot);
+                
+                const bspline1 = new LRBSpline(
+                    this.knotsU,
+                    newKnotsV.slice(0, degreeV + 2)
+                );
+                const bspline2 = new LRBSpline(
+                    this.knotsU,
+                    newKnotsV.slice(1, degreeV + 3)
+                );
+                
+                return [bspline1, bspline2];
+            }
+        }
+
+        /**
+         * Meshline class - represents a single meshline in the LR mesh
+         */
+        class Meshline {
+            constructor(direction, constant, start, end, id) {
+                this.direction = direction; // 'horizontal' or 'vertical'
+                this.constant = constant;   // the fixed coordinate
+                this.start = start;         // start of the line segment
+                this.end = end;             // end of the line segment
+                this.id = id;               // unique identifier
+            }
+        }
+
+        /**
+         * Create initial mesh with B-splines
+         * numElementsU/V: number of elements in each direction (must be >= degree+1)
+         * For degree p with n elements, we get n*p B-splines in that direction
+         */
+        const createMesh = (degreeU, degreeV, numElementsU, numElementsV) => {
+            resetBSplineIdCounter();
+            
+            const meshlines = [];
+            let nextId = 0;
+            
+            // Create knot vectors with distinct values
+            const knotsU = [];
+            const knotsV = [];
+            
+            for (let i = 0; i <= numElementsU; i++) {
+                knotsU.push(i / numElementsU);
+            }
+            for (let i = 0; i <= numElementsV; i++) {
+                knotsV.push(i / numElementsV);
+            }
+            
+            // Create meshlines
+            for (const v of knotsV) {
+                meshlines.push(new Meshline('horizontal', v, 0, 1, nextId++));
+            }
+            for (const u of knotsU) {
+                meshlines.push(new Meshline('vertical', u, 0, 1, nextId++));
+            }
+            
+            // Create initial B-splines
+            // For degree p with n+1 knots, we can create n-p B-splines
+            // Each B-spline uses p+2 consecutive knots
+            const bsplines = [];
+            const numBSplinesU = knotsU.length - degreeU - 1;
+            const numBSplinesV = knotsV.length - degreeV - 1;
+            
+            for (let i = 0; i < numBSplinesU; i++) {
+                for (let j = 0; j < numBSplinesV; j++) {
+                    const localKnotsU = knotsU.slice(i, i + degreeU + 2);
+                    const localKnotsV = knotsV.slice(j, j + degreeV + 2);
+                    bsplines.push(new LRBSpline(localKnotsU, localKnotsV));
+                }
+            }
+
+            return {
+                meshlines,
+                bsplines,
+                degreeU,
+                degreeV,
+                nextId,
+                globalKnotsU: new Set(knotsU),
+                globalKnotsV: new Set(knotsV)
+            };
+        };
+
+        /**
+         * Check if a meshline exists at the given position
+         */
+        const meshlineExists = (mesh, direction, constant, start, end) => {
+            const epsilon = 1e-10;
+            return mesh.meshlines.some(line =>
+                line.direction === direction &&
+                Math.abs(line.constant - constant) < epsilon &&
+                line.start <= start + epsilon &&
+                line.end >= end - epsilon
+            );
+        };
+
+        /**
+         * Get all T-junction endpoints (where local refinements end)
+         * The direction stored indicates which direction we want to EXTEND
+         * (same direction as the existing line that created the T-junction)
+         */
+        const getTJunctionEndpoints = (mesh) => {
+            const epsilon = 1e-10;
+            const endpoints = [];
+            
+            // Find horizontal meshlines that don't span the full domain
+            // At their endpoints, we can continue extending HORIZONTALLY
+            const horizontalLines = mesh.meshlines.filter(line => line.direction === 'horizontal');
+            for (const line of horizontalLines) {
+                // Check if start point is not at domain boundary (u=0)
+                if (line.start > epsilon) {
+                    // This is a T-junction at the start - can extend horizontally from here
+                    endpoints.push({ u: line.start, v: line.constant, direction: 'horizontal', isTJunction: true });
+                }
+                // Check if end point is not at domain boundary (u=1)
+                if (line.end < 1 - epsilon) {
+                    // This is a T-junction at the end - can extend horizontally from here
+                    endpoints.push({ u: line.end, v: line.constant, direction: 'horizontal', isTJunction: true });
+                }
+            }
+            
+            // Find vertical meshlines that don't span the full domain
+            // At their endpoints, we can continue extending VERTICALLY
+            const verticalLines = mesh.meshlines.filter(line => line.direction === 'vertical');
+            for (const line of verticalLines) {
+                // Check if start point is not at domain boundary (v=0)
+                if (line.start > epsilon) {
+                    // This is a T-junction at the start - can extend vertically from here
+                    endpoints.push({ u: line.constant, v: line.start, direction: 'vertical', isTJunction: true });
+                }
+                // Check if end point is not at domain boundary (v=1)
+                if (line.end < 1 - epsilon) {
+                    // This is a T-junction at the end - can extend vertically from here
+                    endpoints.push({ u: line.constant, v: line.end, direction: 'vertical', isTJunction: true });
+                }
+            }
+            
+            return endpoints;
+        };
+
+        /**
+         * Get all valid start points for refinement
+         * 
+         * Rules:
+         * 1. NO points at crossroads (where both horizontal and vertical meshlines exist)
+         *    EXCEPT: midpoints between knots are always valid (they're never at crossroads by definition)
+         * 2. T-junctions: extend in SAME direction as existing line
+         * 3. Points on a single meshline at knot positions: refine PERPENDICULARLY to that meshline
+         */
+        const getValidStartPoints = (mesh) => {
+            const points = [];
+            const epsilon = 1e-10;
+            const knotsU = [...mesh.globalKnotsU].sort((a, b) => a - b);
+            const knotsV = [...mesh.globalKnotsV].sort((a, b) => a - b);
+            
+            // Helper: check if a horizontal meshline passes through point (u, v)
+            const hasHorizontalMeshlineAt = (u, v) => {
+                return mesh.meshlines.some(line =>
+                    line.direction === 'horizontal' &&
+                    Math.abs(line.constant - v) < epsilon &&
+                    line.start <= u + epsilon &&
+                    line.end >= u - epsilon
+                );
+            };
+            
+            // Helper: check if a vertical meshline passes through point (u, v)
+            const hasVerticalMeshlineAt = (u, v) => {
+                return mesh.meshlines.some(line =>
+                    line.direction === 'vertical' &&
+                    Math.abs(line.constant - u) < epsilon &&
+                    line.start <= v + epsilon &&
+                    line.end >= v - epsilon
+                );
+            };
+            
+            // Helper: check if point is at a crossroads (both directions have meshlines)
+            const isCrossroads = (u, v) => {
+                return hasHorizontalMeshlineAt(u, v) && hasVerticalMeshlineAt(u, v);
+            };
+            
+            // Helper: check if point already exists
+            const pointExists = (u, v) => {
+                return points.some(p => 
+                    Math.abs(p.u - u) < epsilon && 
+                    Math.abs(p.v - v) < epsilon
+                );
+            };
+            
+            // CASE 1: Midpoints between V-knots on vertical meshlines → HORIZONTAL refinements
+            // These are the standard refinement points (never at crossroads since they're at midpoints)
+            for (let j = 0; j < knotsV.length - 1; j++) {
+                const midV = (knotsV[j] + knotsV[j + 1]) / 2;
+                
+                const verticalLines = mesh.meshlines.filter(line =>
+                    line.direction === 'vertical' &&
+                    line.start <= midV + epsilon &&
+                    line.end >= midV - epsilon
+                );
+                
+                verticalLines.forEach(line => {
+                    if (!pointExists(line.constant, midV)) {
+                        points.push({ u: line.constant, v: midV, direction: 'horizontal' });
+                    }
+                });
+            }
+            
+            // CASE 2: Midpoints between U-knots on horizontal meshlines → VERTICAL refinements
+            for (let i = 0; i < knotsU.length - 1; i++) {
+                const midU = (knotsU[i] + knotsU[i + 1]) / 2;
+                
+                const horizontalLines = mesh.meshlines.filter(line =>
+                    line.direction === 'horizontal' &&
+                    line.start <= midU + epsilon &&
+                    line.end >= midU - epsilon
+                );
+                
+                horizontalLines.forEach(line => {
+                    if (!pointExists(midU, line.constant)) {
+                        points.push({ u: midU, v: line.constant, direction: 'vertical' });
+                    }
+                });
+            }
+            
+            // CASE 3: T-junction endpoints (extend in SAME direction as existing line)
+            const tJunctions = getTJunctionEndpoints(mesh);
+            for (const tj of tJunctions) {
+                if (!pointExists(tj.u, tj.v)) {
+                    points.push(tj);
+                }
+            }
+            
+            // CASE 4: Points on vertical meshlines at V-knot positions (not midpoints)
+            // These allow HORIZONTAL refinements (perpendicular to the vertical line)
+            // But NOT at crossroads, and NOT if already added
+            for (const line of mesh.meshlines) {
+                if (line.direction === 'vertical') {
+                    for (const v of knotsV) {
+                        if (v >= line.start - epsilon && v <= line.end + epsilon) {
+                            const u = line.constant;
+                            if (!isCrossroads(u, v) && !pointExists(u, v)) {
+                                points.push({ u, v, direction: 'horizontal' });
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // CASE 5: Points on horizontal meshlines at U-knot positions (not midpoints)
+            // These allow VERTICAL refinements (perpendicular to the horizontal line)
+            // But NOT at crossroads, and NOT if already added
+            for (const line of mesh.meshlines) {
+                if (line.direction === 'horizontal') {
+                    for (const u of knotsU) {
+                        if (u >= line.start - epsilon && u <= line.end + epsilon) {
+                            const v = line.constant;
+                            if (!isCrossroads(u, v) && !pointExists(u, v)) {
+                                points.push({ u, v, direction: 'vertical' });
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return points;
+        };
+
+        /**
+         * Get valid end points given a start point
+         * For T-junctions: the direction is already set to the perpendicular direction we want to extend
+         * For regular points: find intersections with perpendicular meshlines
+         */
+        const getValidEndPoints = (mesh, startPoint) => {
+            const points = [];
+            const direction = startPoint.direction;
+            const epsilon = 1e-10;
+            
+            if (direction === 'horizontal') {
+                // Extending horizontally - find vertical meshlines
+                const v = startPoint.v;
+                const verticalLines = mesh.meshlines.filter(line =>
+                    line.direction === 'vertical' &&
+                    line.start <= v + epsilon &&
+                    line.end >= v - epsilon &&
+                    Math.abs(line.constant - startPoint.u) > epsilon
+                );
+                
+                verticalLines.forEach(line => {
+                    points.push({ u: line.constant, v, direction: 'horizontal' });
+                });
+            } else {
+                // Extending vertically - find horizontal meshlines
+                const u = startPoint.u;
+                const horizontalLines = mesh.meshlines.filter(line =>
+                    line.direction === 'horizontal' &&
+                    line.start <= u + epsilon &&
+                    line.end >= u - epsilon &&
+                    Math.abs(line.constant - startPoint.v) > epsilon
+                );
+                
+                horizontalLines.forEach(line => {
+                    points.push({ u, v: line.constant, direction: 'vertical' });
+                });
+            }
+            
+            return points;
+        };
+
+        /**
+         * Check if two B-splines are identical (same knot vectors)
+         */
+        const areBSplinesEqual = (bspline1, bspline2) => {
+            const epsilon = 1e-10;
+            
+            if (bspline1.knotsU.length !== bspline2.knotsU.length ||
+                bspline1.knotsV.length !== bspline2.knotsV.length) {
+                return false;
+            }
+            
+            for (let i = 0; i < bspline1.knotsU.length; i++) {
+                if (Math.abs(bspline1.knotsU[i] - bspline2.knotsU[i]) > epsilon) {
+                    return false;
+                }
+            }
+            
+            for (let i = 0; i < bspline1.knotsV.length; i++) {
+                if (Math.abs(bspline1.knotsV[i] - bspline2.knotsV[i]) > epsilon) {
+                    return false;
+                }
+            }
+            
+            return true;
+        };
+
+        /**
+         * Remove duplicate B-splines from the list
+         */
+        const removeDuplicateBSplines = (bsplines) => {
+            const unique = [];
+            
+            for (const bspline of bsplines) {
+                const isDuplicate = unique.some(existing => areBSplinesEqual(existing, bspline));
+                if (!isDuplicate) {
+                    unique.push(bspline);
+                }
+            }
+            
+            return unique;
+        };
+
+        /**
+         * Try to merge a new meshline with existing collinear meshlines
+         * This handles extending T-junctions to create crossroads
+         */
+        const mergeOrAddMeshline = (meshlines, direction, constant, start, end, nextId) => {
+            const epsilon = 1e-10;
+            const result = [];
+            let merged = false;
+            
+            for (const line of meshlines) {
+                // Check if this line is collinear and can be merged
+                if (line.direction === direction && 
+                    Math.abs(line.constant - constant) < epsilon) {
+                    
+                    // Check if segments are adjacent or overlapping
+                    const gap1 = Math.abs(line.end - start);
+                    const gap2 = Math.abs(end - line.start);
+                    
+                    if (gap1 < epsilon || gap2 < epsilon || 
+                        (start <= line.end + epsilon && end >= line.start - epsilon)) {
+                        // Merge by taking the union
+                        const newStart = Math.min(line.start, start);
+                        const newEnd = Math.max(line.end, end);
+                        result.push(new Meshline(direction, constant, newStart, newEnd, line.id));
+                        merged = true;
+                    } else {
+                        result.push(line);
+                    }
+                } else {
+                    result.push(line);
+                }
+            }
+            
+            // If not merged, add as new meshline
+            if (!merged) {
+                result.push(new Meshline(direction, constant, start, end, nextId));
+            }
+            
+            return { meshlines: result, wasNewLine: !merged };
+        };
+
+        /**
+         * Add a new meshline and split B-splines accordingly
+         * This is the key function: recursively split B-splines that are fully traversed
+         * Now supports extending T-junctions by merging with existing meshlines
+         */
+        const addMeshline = (mesh, direction, constant, start, end) => {
+            const epsilon = 1e-10;
+            
+            // Check if meshline already exists
+            if (meshlineExists(mesh, direction, constant, start, end)) {
+                return mesh;
+            }
+
+            const newMesh = { ...mesh };
+            
+            // Try to merge with existing meshlines (extends T-junctions)
+            const mergeResult = mergeOrAddMeshline(
+                mesh.meshlines, 
+                direction, 
+                constant, 
+                start, 
+                end, 
+                newMesh.nextId
+            );
+            
+            newMesh.meshlines = mergeResult.meshlines;
+            if (mergeResult.wasNewLine) {
+                newMesh.nextId++;
+            }
+
+            // Update global knot sets
+            if (direction === 'horizontal') {
+                newMesh.globalKnotsV = new Set([...mesh.globalKnotsV, constant]);
+            } else {
+                newMesh.globalKnotsU = new Set([...mesh.globalKnotsU, constant]);
+            }
+
+            // Find the merged meshline to use its full extent for splitting
+            const mergedLine = newMesh.meshlines.find(line =>
+                line.direction === direction &&
+                Math.abs(line.constant - constant) < epsilon
+            );
+            const effectiveStart = mergedLine ? mergedLine.start : start;
+            const effectiveEnd = mergedLine ? mergedLine.end : end;
+
+            // Split B-splines that are fully traversed by the effective (merged) meshline
+            const newBSplines = [];
+            
+            for (const bspline of mesh.bsplines) {
+                let shouldSplit = false;
+                
+                if (direction === 'horizontal') {
+                    shouldSplit = bspline.isFullyTraversedByHorizontal(constant, effectiveStart, effectiveEnd);
+                } else {
+                    shouldSplit = bspline.isFullyTraversedByVertical(constant, effectiveStart, effectiveEnd);
+                }
+                
+                if (shouldSplit) {
+                    // Split the B-spline
+                    let splitResult;
+                    if (direction === 'horizontal') {
+                        splitResult = bspline.splitV(constant);
+                    } else {
+                        splitResult = bspline.splitU(constant);
+                    }
+                    
+                    // Add both resulting B-splines
+                    newBSplines.push(...splitResult);
+                } else {
+                    // Keep the B-spline as is
+                    newBSplines.push(bspline);
+                }
+            }
+            
+            // Remove duplicates - this can happen when splitting different B-splines
+            // from left/right or top/bottom creates identical B-splines
+            newMesh.bsplines = removeDuplicateBSplines(newBSplines);
+            
+            // Sort B-splines in lexicographical order by Greville points
+            newMesh.bsplines.sort((a, b) => {
+                const ga = a.getGrevillePoint();
+                const gb = b.getGrevillePoint();
+                if (Math.abs(ga.v - gb.v) > 1e-10) {
+                    return gb.v - ga.v; // Sort by v descending (top to bottom)
+                }
+                return ga.u - gb.u; // Then by u ascending (left to right)
+            });
+            
+            return newMesh;
+        };
+
+        /**
+         * Main App Component
+         */
+        function App() {
+            const [degreeU, setDegreeU] = useState(2);
+            const [degreeV, setDegreeV] = useState(2);
+            const [numElementsU, setNumElementsU] = useState(3);
+            const [numElementsV, setNumElementsV] = useState(3);
+            const [mesh, setMesh] = useState(() => createMesh(2, 2, 3, 3));
+            const [refinementStart, setRefinementStart] = useState(null);
+            const [selectedBSpline, setSelectedBSpline] = useState(null);
+            const [showGreville, setShowGreville] = useState(true);
+
+            // Ensure numElements >= degree+1
+            const minElementsU = degreeU + 1;
+            const minElementsV = degreeV + 1;
+
+            // Reset mesh
+            const handleReset = () => {
+                setMesh(createMesh(degreeU, degreeV, numElementsU, numElementsV));
+                setRefinementStart(null);
+                setSelectedBSpline(null);
+            };
+
+            // Update elements when degree changes to maintain minimum
+            const handleDegreeUChange = (newDegree) => {
+                setDegreeU(newDegree);
+                if (numElementsU < newDegree + 1) {
+                    setNumElementsU(newDegree + 1);
+                }
+            };
+
+            const handleDegreeVChange = (newDegree) => {
+                setDegreeV(newDegree);
+                if (numElementsV < newDegree + 1) {
+                    setNumElementsV(newDegree + 1);
+                }
+            };
+
+            // Handle element count change with reset
+            const handleElementsUChange = (newElements) => {
+                if (mesh.bsplines.length > (newElements - degreeU) * (numElementsV - degreeV)) {
+                    if (!confirm('Changing initial elements will reset the mesh and lose current refinements. Continue?')) {
+                        return;
+                    }
+                }
+                setNumElementsU(newElements);
+                setMesh(createMesh(degreeU, degreeV, newElements, numElementsV));
+                setRefinementStart(null);
+                setSelectedBSpline(null);
+            };
+
+            const handleElementsVChange = (newElements) => {
+                if (mesh.bsplines.length > (numElementsU - degreeU) * (newElements - degreeV)) {
+                    if (!confirm('Changing initial elements will reset the mesh and lose current refinements. Continue?')) {
+                        return;
+                    }
+                }
+                setNumElementsV(newElements);
+                setMesh(createMesh(degreeU, degreeV, numElementsU, newElements));
+                setRefinementStart(null);
+                setSelectedBSpline(null);
+            };
+
+            // Handle clicking on a point
+            const handlePointClick = (point) => {
+                if (!refinementStart) {
+                    setRefinementStart(point);
+                } else {
+                    const direction = refinementStart.direction;
+                    if (direction === 'horizontal') {
+                        const minU = Math.min(refinementStart.u, point.u);
+                        const maxU = Math.max(refinementStart.u, point.u);
+                        const newMesh = addMeshline(mesh, 'horizontal', point.v, minU, maxU);
+                        setMesh(newMesh);
+                    } else {
+                        const minV = Math.min(refinementStart.v, point.v);
+                        const maxV = Math.max(refinementStart.v, point.v);
+                        const newMesh = addMeshline(mesh, 'vertical', point.u, minV, maxV);
+                        setMesh(newMesh);
+                    }
+                    setRefinementStart(null);
+                    setSelectedBSpline(null);
+                }
+            };
+
+            const validStartPoints = getValidStartPoints(mesh);
+            const validEndPoints = refinementStart 
+                ? getValidEndPoints(mesh, refinementStart)
+                : [];
+
+            return (
+                <div className="container">
+                    <div className="controls">
+                        <h2>LR B-Spline Refinement</h2>
+                        
+                        <div className="info">
+                            Single B-spline start (distinct knots only). Click two points to add a refinement.
+                        </div>
+
+                        <div className="control-group">
+                            <label>Degree U: {degreeU}</label>
+                            <input
+                                type="range"
+                                min="1"
+                                max="5"
+                                value={degreeU}
+                                onChange={(e) => handleDegreeUChange(parseInt(e.target.value))}
+                            />
+                        </div>
+
+                        <div className="control-group">
+                            <label>Degree V: {degreeV}</label>
+                            <input
+                                type="range"
+                                min="1"
+                                max="5"
+                                value={degreeV}
+                                onChange={(e) => handleDegreeVChange(parseInt(e.target.value))}
+                            />
+                        </div>
+
+                        <div className="control-group">
+                            <label>Initial Elements U: {numElementsU} (min: {minElementsU})</label>
+                            <input
+                                type="range"
+                                min={minElementsU}
+                                max="10"
+                                value={numElementsU}
+                                onChange={(e) => handleElementsUChange(parseInt(e.target.value))}
+                            />
+                        </div>
+
+                        <div className="control-group">
+                            <label>Initial Elements V: {numElementsV} (min: {minElementsV})</label>
+                            <input
+                                type="range"
+                                min={minElementsV}
+                                max="10"
+                                value={numElementsV}
+                                onChange={(e) => handleElementsVChange(parseInt(e.target.value))}
+                            />
+                        </div>
+
+                        <div className="control-group">
+                            <button onClick={handleReset}>Reset Mesh</button>
+                            {refinementStart && (
+                                <button onClick={() => setRefinementStart(null)}>
+                                    Clear Selection
+                                </button>
+                            )}
+                            <button onClick={() => setShowGreville(!showGreville)}>
+                                {showGreville ? 'Hide' : 'Show'} Greville Points
+                            </button>
+                        </div>
+
+                        <div className="control-group">
+                            <label>Statistics:</label>
+                            <div style={{ fontSize: '14px', color: '#666' }}>
+                                Meshlines: {mesh.meshlines.length}<br />
+                                B-splines: {mesh.bsplines.length}
+                            </div>
+                        </div>
+
+                        <div className="control-group">
+                            <label>B-splines (click to highlight):</label>
+                            <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                                {mesh.bsplines.map(bspline => {
+                                    return (
+                                        <div
+                                            key={bspline.id}
+                                            className={`bspline-item ${selectedBSpline === bspline.id ? 'selected' : ''}`}
+                                            onClick={() => setSelectedBSpline(
+                                                selectedBSpline === bspline.id ? null : bspline.id
+                                            )}
+                                        >
+                                            #{bspline.id}<br />
+                                            u: [{bspline.knotsU.map(k => k.toFixed(2)).join(', ')}]<br />
+                                            v: [{bspline.knotsV.map(k => k.toFixed(2)).join(', ')}]
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="visualization">
+                        <MeshVisualization
+                            mesh={mesh}
+                            validStartPoints={validStartPoints}
+                            validEndPoints={validEndPoints}
+                            refinementStart={refinementStart}
+                            selectedBSpline={selectedBSpline}
+                            showGreville={showGreville}
+                            onPointClick={handlePointClick}
+                            onGrevilleClick={setSelectedBSpline}
+                        />
+                    </div>
+                </div>
+            );
+        }
+
+        /**
+         * Mesh Visualization Component
+         */
+        function MeshVisualization({ 
+            mesh, 
+            validStartPoints, 
+            validEndPoints, 
+            refinementStart,
+            selectedBSpline,
+            showGreville,
+            onPointClick,
+            onGrevilleClick
+        }) {
+            const width = 600;
+            const height = 600;
+            const margin = 40;
+            const scale = width - 2 * margin;
+
+            const toSVGX = (u) => margin + u * scale;
+            const toSVGY = (v) => margin + (1 - v) * scale;
+
+            // Render B-spline supports
+            const renderBSplineSupports = () => {
+                return mesh.bsplines.map(bspline => {
+                    const support = bspline.getSupport();
+                    const x = toSVGX(support.uMin);
+                    const y = toSVGY(support.vMax);
+                    const w = (support.uMax - support.uMin) * scale;
+                    const h = (support.vMax - support.vMin) * scale;
+                    
+                    const isSelected = selectedBSpline === bspline.id;
+                    
+                    return (
+                        <rect
+                            key={bspline.id}
+                            x={x}
+                            y={y}
+                            width={w}
+                            height={h}
+                            fill={isSelected ? "#007acc" : "#e0e0e0"}
+                            fillOpacity={isSelected ? "0.3" : "0.15"}
+                            stroke={isSelected ? "#007acc" : "#999"}
+                            strokeWidth={isSelected ? "2" : "1"}
+                            strokeDasharray={isSelected ? "none" : "3,3"}
+                        />
+                    );
+                });
+            };
+
+            // Render meshlines
+            const renderMeshlines = () => {
+                return mesh.meshlines.map(line => {
+                    if (line.direction === 'horizontal') {
+                        const y = toSVGY(line.constant);
+                        const x1 = toSVGX(line.start);
+                        const x2 = toSVGX(line.end);
+                        return (
+                            <line
+                                key={line.id}
+                                x1={x1}
+                                y1={y}
+                                x2={x2}
+                                y2={y}
+                                stroke="#333"
+                                strokeWidth="2"
+                            />
+                        );
+                    } else {
+                        const x = toSVGX(line.constant);
+                        const y1 = toSVGY(line.start);
+                        const y2 = toSVGY(line.end);
+                        return (
+                            <line
+                                key={line.id}
+                                x1={x}
+                                y1={y1}
+                                x2={x}
+                                y2={y2}
+                                stroke="#333"
+                                strokeWidth="2"
+                            />
+                        );
+                    }
+                });
+            };
+
+            // Render refinement points
+            const renderRefinementPoints = () => {
+                const points = refinementStart ? validEndPoints : validStartPoints;
+                const allPoints = points.map((point, idx) => {
+                    const isStart = refinementStart && 
+                        Math.abs(point.u - refinementStart.u) < 1e-10 && 
+                        Math.abs(point.v - refinementStart.v) < 1e-10;
+                    
+                    return (
+                        <circle
+                            key={idx}
+                            cx={toSVGX(point.u)}
+                            cy={toSVGY(point.v)}
+                            r="6"
+                            fill={isStart ? "#dc3545" : "#007acc"}
+                            stroke="white"
+                            strokeWidth="2"
+                            cursor="pointer"
+                            onClick={() => onPointClick(point)}
+                        />
+                    );
+                });
+
+                if (refinementStart) {
+                    allPoints.push(
+                        <circle
+                            key="start-overlay"
+                            cx={toSVGX(refinementStart.u)}
+                            cy={toSVGY(refinementStart.v)}
+                            r="6"
+                            fill="#dc3545"
+                            stroke="white"
+                            strokeWidth="2"
+                            cursor="pointer"
+                            onClick={() => onPointClick(refinementStart)}
+                        />
+                    );
+                }
+
+                return allPoints;
+            };
+
+            // Render preview line
+            const renderPreviewLine = () => {
+                if (!refinementStart) return null;
+
+                const { u, v, direction } = refinementStart;
+                
+                if (direction === 'horizontal') {
+                    return (
+                        <line
+                            x1={toSVGX(0)}
+                            y1={toSVGY(v)}
+                            x2={toSVGX(1)}
+                            y2={toSVGY(v)}
+                            stroke="#007acc"
+                            strokeWidth="1"
+                            strokeDasharray="5,5"
+                            opacity="0.5"
+                        />
+                    );
+                } else {
+                    return (
+                        <line
+                            x1={toSVGX(u)}
+                            y1={toSVGY(0)}
+                            x2={toSVGX(u)}
+                            y2={toSVGY(1)}
+                            stroke="#007acc"
+                            strokeWidth="1"
+                            strokeDasharray="5,5"
+                            opacity="0.5"
+                        />
+                    );
+                }
+            };
+
+            // Render Greville points
+            const renderGrevillePoints = () => {
+                if (!showGreville) return null;
+                
+                return mesh.bsplines.map(bspline => {
+                    const greville = bspline.getGrevillePoint();
+                    const isSelected = selectedBSpline === bspline.id;
+                    
+                    return (
+                        <circle
+                            key={`greville-${bspline.id}`}
+                            cx={toSVGX(greville.u)}
+                            cy={toSVGY(greville.v)}
+                            r="5"
+                            fill={isSelected ? "#ff6b6b" : "#28a745"}
+                            stroke="white"
+                            strokeWidth="2"
+                            cursor="pointer"
+                            onClick={() => onGrevilleClick(bspline.id)}
+                        />
+                    );
+                });
+            };
+
+            return (
+                <svg width={width} height={height}>
+                    {/* Background */}
+                    <rect 
+                        x={margin} 
+                        y={margin} 
+                        width={scale} 
+                        height={scale} 
+                        fill="none" 
+                        stroke="#ccc" 
+                        strokeWidth="1" 
+                    />
+
+                    {/* B-spline supports (render first, underneath meshlines) */}
+                    {renderBSplineSupports()}
+
+                    {/* Meshlines */}
+                    {renderMeshlines()}
+
+                    {/* Preview line */}
+                    {renderPreviewLine()}
+
+                    {/* Refinement points (render first) */}
+                    {renderRefinementPoints()}
+
+                    {/* Greville points (render on top when visible) */}
+                    {renderGrevillePoints()}
+
+                    {/* Axis labels */}
+                    <text x={width/2} y={height - 10} textAnchor="middle" fontSize="14" fill="#666">u</text>
+                    <text x={10} y={height/2} textAnchor="middle" fontSize="14" fill="#666" transform={`rotate(-90, 10, ${height/2})`}>v</text>
+                </svg>
+            );
+        }
+
+        // Render the app
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
