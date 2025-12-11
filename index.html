@@ -842,6 +842,7 @@
             const [selectedBSpline, setSelectedBSpline] = useState(null);
             const [showGreville, setShowGreville] = useState(true);
             const [showRefinementPoints, setShowRefinementPoints] = useState(true);
+            const [showResetConfig, setShowResetConfig] = useState(false);
 
             // Ensure numElements >= degree+1
             const minElementsU = degreeU + 1;
@@ -869,29 +870,12 @@
                 }
             };
 
-            // Handle element count change with reset
-            const handleElementsUChange = (newElements) => {
-                if (mesh.bsplines.length > (newElements - degreeU) * (numElementsV - degreeV)) {
-                    if (!confirm('Changing initial elements will reset the mesh and lose current refinements. Continue?')) {
-                        return;
-                    }
-                }
-                setNumElementsU(newElements);
-                setMesh(createMesh(degreeU, degreeV, newElements, numElementsV));
+            // Handle reset with current configuration values
+            const handleApplyReset = () => {
+                setMesh(createMesh(degreeU, degreeV, numElementsU, numElementsV));
                 setRefinementStart(null);
                 setSelectedBSpline(null);
-            };
-
-            const handleElementsVChange = (newElements) => {
-                if (mesh.bsplines.length > (numElementsU - degreeU) * (newElements - degreeV)) {
-                    if (!confirm('Changing initial elements will reset the mesh and lose current refinements. Continue?')) {
-                        return;
-                    }
-                }
-                setNumElementsV(newElements);
-                setMesh(createMesh(degreeU, degreeV, numElementsU, newElements));
-                setRefinementStart(null);
-                setSelectedBSpline(null);
+                setShowResetConfig(false);
             };
 
             // Handle clicking on a point
@@ -931,51 +915,64 @@
                         </div>
 
                         <div className="control-group">
-                            <label>Degree U: {degreeU}</label>
-                            <input
-                                type="range"
-                                min="1"
-                                max="5"
-                                value={degreeU}
-                                onChange={(e) => handleDegreeUChange(parseInt(e.target.value))}
-                            />
+                            <button onClick={() => setShowResetConfig(!showResetConfig)}>
+                                {showResetConfig ? 'Hide' : 'Show'} Reset Configuration
+                            </button>
                         </div>
 
-                        <div className="control-group">
-                            <label>Degree V: {degreeV}</label>
-                            <input
-                                type="range"
-                                min="1"
-                                max="5"
-                                value={degreeV}
-                                onChange={(e) => handleDegreeVChange(parseInt(e.target.value))}
-                            />
-                        </div>
+                        {showResetConfig && (
+                            <>
+                                <div className="control-group">
+                                    <label>Degree U: {degreeU}</label>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="5"
+                                        value={degreeU}
+                                        onChange={(e) => handleDegreeUChange(parseInt(e.target.value))}
+                                    />
+                                </div>
+
+                                <div className="control-group">
+                                    <label>Degree V: {degreeV}</label>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="5"
+                                        value={degreeV}
+                                        onChange={(e) => handleDegreeVChange(parseInt(e.target.value))}
+                                    />
+                                </div>
+
+                                <div className="control-group">
+                                    <label>Initial Elements U: {numElementsU} (min: {minElementsU})</label>
+                                    <input
+                                        type="range"
+                                        min={minElementsU}
+                                        max="10"
+                                        value={numElementsU}
+                                        onChange={(e) => setNumElementsU(parseInt(e.target.value))}
+                                    />
+                                </div>
+
+                                <div className="control-group">
+                                    <label>Initial Elements V: {numElementsV} (min: {minElementsV})</label>
+                                    <input
+                                        type="range"
+                                        min={minElementsV}
+                                        max="10"
+                                        value={numElementsV}
+                                        onChange={(e) => setNumElementsV(parseInt(e.target.value))}
+                                    />
+                                </div>
+
+                                <div className="control-group">
+                                    <button onClick={handleApplyReset}>Apply & Reset Mesh</button>
+                                </div>
+                            </>
+                        )}
 
                         <div className="control-group">
-                            <label>Initial Elements U: {numElementsU} (min: {minElementsU})</label>
-                            <input
-                                type="range"
-                                min={minElementsU}
-                                max="10"
-                                value={numElementsU}
-                                onChange={(e) => handleElementsUChange(parseInt(e.target.value))}
-                            />
-                        </div>
-
-                        <div className="control-group">
-                            <label>Initial Elements V: {numElementsV} (min: {minElementsV})</label>
-                            <input
-                                type="range"
-                                min={minElementsV}
-                                max="10"
-                                value={numElementsV}
-                                onChange={(e) => handleElementsVChange(parseInt(e.target.value))}
-                            />
-                        </div>
-
-                        <div className="control-group">
-                            <button onClick={handleReset}>Reset Mesh</button>
                             {refinementStart && (
                                 <button onClick={() => setRefinementStart(null)}>
                                     Clear Selection
