@@ -567,47 +567,130 @@
         /**
          * Try to merge a new meshline with existing collinear meshlines
          * This handles extending T-junctions to create crossroads
+         * Also merges multiple disjoint segments if the new line bridges them
          */
         const mergeOrAddMeshline = (meshlines, direction, constant, start, end, nextId) => {
             const epsilon = 1e-10;
-            const result = [];
-            let merged = false;
+            const nonCollinear = [];
+            const collinear = [];
             
+            // Separate collinear and non-collinear meshlines
             for (const line of meshlines) {
-                // Check if this line is collinear and can be merged
                 if (line.direction === direction && 
                     Math.abs(line.constant - constant) < epsilon) {
-                    
-                    // Check if segments are adjacent or overlapping
-                    const gap1 = Math.abs(line.end - start);
-                    const gap2 = Math.abs(end - line.start);
-                    
-                    if (gap1 < epsilon || gap2 < epsilon || 
-                        (start <= line.end + epsilon && end >= line.start - epsilon)) {
-                        // Merge by taking the union
-                        const newStart = Math.min(line.start, start);
-                        const newEnd = Math.max(line.end, end);
-                        result.push(new Meshline(direction, constant, newStart, newEnd, line.id));
-                        merged = true;
-                    } else {
-                        result.push(line);
-                    }
+                    collinear.push(line);
                 } else {
-                    result.push(line);
+                    nonCollinear.push(line);
                 }
             }
             
-            // If not merged, add as new meshline
-            if (!merged) {
-                result.push(new Meshline(direction, constant, start, end, nextId));
+            // Start with the new segment
+            let mergedStart = start;
+            let mergedEnd = end;
+            let mergedId = nextId;
+            let anyMerged = false;
+            const keptCollinear = [];
+            
+            // Try to merge with each collinear segment
+            for (const line of collinear) {
+                // Check if segments are adjacent or overlapping
+                if (mergedStart <= line.end + epsilon && mergedEnd >= line.start - epsilon) {
+                    // Merge by taking the union
+                    mergedStart = Math.min(mergedStart, line.start);
+                    mergedEnd = Math.max(mergedEnd, line.end);
+                    if (!anyMerged) {
+                        mergedId = line.id; // Keep the first merged line's ID
+                    }
+                    anyMerged = true;
+                } else {
+                    // Keep this segment separate
+                    keptCollinear.push(line);
+                }
             }
             
-            return { meshlines: result, wasNewLine: !merged };
+            // Build result
+            const result = [
+                ...nonCollinear,
+                ...keptCollinear,
+                new Meshline(direction, constant, mergedStart, mergedEnd, mergedId)
+            ];
+            
+            return { meshlines: result, wasNewLine: !anyMerged };
+        };
+
+        /**
+         * Count how many times a knot value appears in a knot vector
+         */
+        const countKnotInVector = (knotVector, knotValue) => {
+            const epsilon = 1e-10;
+            let count = 0;
+            for (const k of knotVector) {
+                if (Math.abs(k - knotValue) < epsilon) {
+                    count++;
+                }
+            }
+            return count;
+        };
+
+        /**
+         * Check if a meshline splits a B-spline
+         * A meshline splits a B-spline if:
+         * 1. The constant coordinate is strictly inside the B-spline's support in that direction
+         * 2. The meshline spans the entire support of the B-spline in the other direction
+         * 3. The knot value doesn't already exist in the B-spline's local knot vector
+         *    (or exists with multiplicity less than the meshline's multiplicity)
+         */
+        const meshlineSplitsBSpline = (meshline, bspline, multiplicity = 1) => {
+            const epsilon = 1e-10;
+            const support = bspline.getSupport();
+            
+            if (meshline.direction === 'horizontal') {
+                // Horizontal line has constant v, spans in u direction
+                // Check if v is strictly inside the B-spline's v-support
+                const vInside = meshline.constant > support.vMin + epsilon && 
+                               meshline.constant < support.vMax - epsilon;
+                // Check if line spans the entire u-support
+                const uSpans = meshline.start <= support.uMin + epsilon && 
+                              meshline.end >= support.uMax - epsilon;
+                
+                if (!vInside || !uSpans) return false;
+                
+                // Check if the knot already exists in the B-spline's v knot vector
+                const nKnots = countKnotInVector(bspline.knotsV, meshline.constant);
+                return nKnots < multiplicity;
+            } else {
+                // Vertical line has constant u, spans in v direction
+                // Check if u is strictly inside the B-spline's u-support
+                const uInside = meshline.constant > support.uMin + epsilon && 
+                               meshline.constant < support.uMax - epsilon;
+                // Check if line spans the entire v-support
+                const vSpans = meshline.start <= support.vMin + epsilon && 
+                              meshline.end >= support.vMax - epsilon;
+                
+                if (!uInside || !vSpans) return false;
+                
+                // Check if the knot already exists in the B-spline's u knot vector
+                const nKnots = countKnotInVector(bspline.knotsU, meshline.constant);
+                return nKnots < multiplicity;
+            }
+        };
+
+        /**
+         * Split a B-spline by a meshline and return the resulting B-splines
+         */
+        const splitBSplineByMeshline = (bspline, meshline) => {
+            if (meshline.direction === 'horizontal') {
+                return bspline.splitV(meshline.constant);
+            } else {
+                return bspline.splitU(meshline.constant);
+            }
         };
 
         /**
          * Add a new meshline and split B-splines accordingly
-         * This is the key function: recursively split B-splines that are fully traversed
+         * This implements a two-step refinement process similar to the LRSplines library:
+         * Step 1: Split all existing B-splines that are traversed by the new meshline
+         * Step 2: Check if any newly created B-splines need to be split by existing meshlines
          * Now supports extending T-junctions by merging with existing meshlines
          */
         const addMeshline = (mesh, direction, constant, start, end) => {
@@ -647,50 +730,100 @@
                 line.direction === direction &&
                 Math.abs(line.constant - constant) < epsilon
             );
-            const effectiveStart = mergedLine ? mergedLine.start : start;
-            const effectiveEnd = mergedLine ? mergedLine.end : end;
-
-            // Split B-splines that are fully traversed by the effective (merged) meshline
-            const newBSplines = [];
             
-            for (const bspline of mesh.bsplines) {
-                let shouldSplit = false;
-                
-                if (direction === 'horizontal') {
-                    shouldSplit = bspline.isFullyTraversedByHorizontal(constant, effectiveStart, effectiveEnd);
-                } else {
-                    shouldSplit = bspline.isFullyTraversedByVertical(constant, effectiveStart, effectiveEnd);
-                }
-                
-                if (shouldSplit) {
+            // Create a meshline object for the new/merged line
+            const newMeshline = {
+                direction: direction,
+                constant: constant,
+                start: mergedLine ? mergedLine.start : start,
+                end: mergedLine ? mergedLine.end : end
+            };
+
+            // STEP 1: Split all existing B-splines that are traversed by the NEW meshline
+            let currentBSplines = [...mesh.bsplines];
+            let newlyCreatedBSplines = [];
+            
+            for (const bspline of currentBSplines) {
+                if (meshlineSplitsBSpline(newMeshline, bspline)) {
                     // Split the B-spline
-                    let splitResult;
-                    if (direction === 'horizontal') {
-                        splitResult = bspline.splitV(constant);
-                    } else {
-                        splitResult = bspline.splitU(constant);
-                    }
-                    
-                    // Add both resulting B-splines
-                    newBSplines.push(...splitResult);
+                    const splitResult = splitBSplineByMeshline(bspline, newMeshline);
+                    newlyCreatedBSplines.push(...splitResult);
                 } else {
-                    // Keep the B-spline as is
-                    newBSplines.push(bspline);
+                    // Keep the B-spline as is - but it's not "newly created"
+                    // We track it separately
                 }
             }
             
+            // Separate B-splines that weren't split
+            const unsplitBSplines = currentBSplines.filter(bspline => 
+                !meshlineSplitsBSpline(newMeshline, bspline)
+            );
+
+            // STEP 2: Check if any newly created B-splines need to be split by existing meshlines
+            // Keep processing until no more splits occur
+            let splitsOccurred = true;
+            while (splitsOccurred) {
+                splitsOccurred = false;
+                const nextNewBSplines = [];
+                
+                for (const bspline of newlyCreatedBSplines) {
+                    let wasSplit = false;
+                    
+                    // Check against all existing meshlines
+                    for (const line of newMesh.meshlines) {
+                        const meshlineObj = {
+                            direction: line.direction,
+                            constant: line.constant,
+                            start: line.start,
+                            end: line.end
+                        };
+                        
+                        if (meshlineSplitsBSpline(meshlineObj, bspline)) {
+                            // Split this B-spline
+                            const splitResult = splitBSplineByMeshline(bspline, meshlineObj);
+                            nextNewBSplines.push(...splitResult);
+                            wasSplit = true;
+                            splitsOccurred = true;
+                            break; // Only split by one meshline at a time
+                        }
+                    }
+                    
+                    if (!wasSplit) {
+                        nextNewBSplines.push(bspline);
+                    }
+                }
+                
+                newlyCreatedBSplines = nextNewBSplines;
+            }
+            
+            // Combine unsplit and newly created B-splines
+            const allBSplines = [...unsplitBSplines, ...newlyCreatedBSplines];
+            
             // Remove duplicates - this can happen when splitting different B-splines
             // from left/right or top/bottom creates identical B-splines
-            newMesh.bsplines = removeDuplicateBSplines(newBSplines);
+            newMesh.bsplines = removeDuplicateBSplines(allBSplines);
             
-            // Sort B-splines in lexicographical order by Greville points
+            // Sort B-splines lexicographically by knot vectors (v first, then u)
             newMesh.bsplines.sort((a, b) => {
-                const ga = a.getGrevillePoint();
-                const gb = b.getGrevillePoint();
-                if (Math.abs(ga.v - gb.v) > 1e-10) {
-                    return gb.v - ga.v; // Sort by v descending (top to bottom)
+                const epsilon = 1e-10;
+                // First compare v knot vectors lexicographically
+                const minLenV = Math.min(a.knotsV.length, b.knotsV.length);
+                for (let i = 0; i < minLenV; i++) {
+                    if (Math.abs(a.knotsV[i] - b.knotsV[i]) > epsilon) {
+                        return a.knotsV[i] - b.knotsV[i];
+                    }
                 }
-                return ga.u - gb.u; // Then by u ascending (left to right)
+                if (a.knotsV.length !== b.knotsV.length) {
+                    return a.knotsV.length - b.knotsV.length;
+                }
+                // Then compare u knot vectors lexicographically
+                const minLenU = Math.min(a.knotsU.length, b.knotsU.length);
+                for (let i = 0; i < minLenU; i++) {
+                    if (Math.abs(a.knotsU[i] - b.knotsU[i]) > epsilon) {
+                        return a.knotsU[i] - b.knotsU[i];
+                    }
+                }
+                return a.knotsU.length - b.knotsU.length;
             });
             
             return newMesh;
@@ -708,6 +841,7 @@
             const [refinementStart, setRefinementStart] = useState(null);
             const [selectedBSpline, setSelectedBSpline] = useState(null);
             const [showGreville, setShowGreville] = useState(true);
+            const [showRefinementPoints, setShowRefinementPoints] = useState(true);
 
             // Ensure numElements >= degree+1
             const minElementsU = degreeU + 1;
@@ -850,6 +984,9 @@
                             <button onClick={() => setShowGreville(!showGreville)}>
                                 {showGreville ? 'Hide' : 'Show'} Greville Points
                             </button>
+                            <button onClick={() => setShowRefinementPoints(!showRefinementPoints)}>
+                                {showRefinementPoints ? 'Hide' : 'Show'} Refinement Points
+                            </button>
                         </div>
 
                         <div className="control-group">
@@ -863,7 +1000,7 @@
                         <div className="control-group">
                             <label>B-splines (click to highlight):</label>
                             <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
-                                {mesh.bsplines.map(bspline => {
+                                {mesh.bsplines.map((bspline, index) => {
                                     return (
                                         <div
                                             key={bspline.id}
@@ -872,7 +1009,6 @@
                                                 selectedBSpline === bspline.id ? null : bspline.id
                                             )}
                                         >
-                                            #{bspline.id}<br />
                                             u: [{bspline.knotsU.map(k => k.toFixed(2)).join(', ')}]<br />
                                             v: [{bspline.knotsV.map(k => k.toFixed(2)).join(', ')}]
                                         </div>
@@ -890,6 +1026,7 @@
                             refinementStart={refinementStart}
                             selectedBSpline={selectedBSpline}
                             showGreville={showGreville}
+                            showRefinementPoints={showRefinementPoints}
                             onPointClick={handlePointClick}
                             onGrevilleClick={setSelectedBSpline}
                         />
@@ -908,6 +1045,7 @@
             refinementStart,
             selectedBSpline,
             showGreville,
+            showRefinementPoints,
             onPointClick,
             onGrevilleClick
         }) {
@@ -986,6 +1124,7 @@
 
             // Render refinement points
             const renderRefinementPoints = () => {
+                if (!showRefinementPoints) return null;
                 const points = refinementStart ? validEndPoints : validStartPoints;
                 const allPoints = points.map((point, idx) => {
                     const isStart = refinementStart && 
