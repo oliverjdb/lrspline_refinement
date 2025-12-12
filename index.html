@@ -99,7 +99,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useMemo, useCallback } = React;
 
         let nextBSplineId = 0;
         const generateBSplineId = () => nextBSplineId++;
@@ -917,15 +917,44 @@
             const [nestingLevels, setNestingLevels] = useState(null);
             const [selectedNestingLevel, setSelectedNestingLevel] = useState(null);
 
+            const setOverlayFlags = useCallback((config) => {
+                setShowGreville(config.greville);
+                setShowElementCounts(config.elementCounts);
+                setShowPeeledGreville(config.peeledGreville);
+                setShowPeeledElementCounts(config.peeledCounts);
+            }, []);
+
+            const applyOverlayState = useCallback((state) => {
+                const nextState = OVERLAY_STATES[state] || OVERLAY_STATES.none;
+                setOverlayFlags(nextState);
+            }, [setOverlayFlags]);
+
+            const clearSelectionState = useCallback(() => {
+                setRefinementStart(null);
+                setSelectedBSpline(null);
+            }, []);
+
+            const clearAnalysisState = useCallback(() => {
+                setPeeledBSplines(null);
+                setKnotTuplePeeledRemove(null);
+                setNestingLevels(null);
+                setSelectedNestingLevel(null);
+                applyOverlayState('none');
+            }, [applyOverlayState]);
+
+            const resetMeshState = useCallback((nextMesh) => {
+                setMesh(nextMesh);
+                clearSelectionState();
+                clearAnalysisState();
+            }, [clearAnalysisState, clearSelectionState]);
+
             // Ensure numElements >= degree+1
             const minElementsU = degreeU + 1;
             const minElementsV = degreeV + 1;
 
             // Reset mesh
             const handleReset = () => {
-                setMesh(createMesh(degreeU, degreeV, numElementsU, numElementsV));
-                setRefinementStart(null);
-                setSelectedBSpline(null);
+                resetMeshState(createMesh(degreeU, degreeV, numElementsU, numElementsV));
             };
 
             // Update elements when degree changes to maintain minimum
@@ -945,13 +974,8 @@
 
             // Handle reset with current configuration values
             const handleApplyReset = () => {
-                setMesh(createMesh(degreeU, degreeV, numElementsU, numElementsV));
-                setRefinementStart(null);
-                setSelectedBSpline(null);
+                resetMeshState(createMesh(degreeU, degreeV, numElementsU, numElementsV));
                 setShowResetConfig(false);
-                setPeeledBSplines(null);
-                setNestingLevels(null);
-                setSelectedNestingLevel(null);
             };
 
             // Compute peeled set
@@ -976,39 +1000,40 @@
             };
 
             // Get max nesting level
-            const maxNestingLevel = nestingLevels 
-                ? Math.max(...nestingLevels.values())
-                : 0;
+            const maxNestingLevel = useMemo(() => {
+                if (!nestingLevels || nestingLevels.size === 0) {
+                    return 0;
+                }
+                return Math.max(...nestingLevels.values());
+            }, [nestingLevels]);
 
             // Handle clicking on a point
             const handlePointClick = (point) => {
                 if (!refinementStart) {
                     setRefinementStart(point);
-                } else {
-                    const direction = refinementStart.direction;
-                    if (direction === 'horizontal') {
-                        const minU = Math.min(refinementStart.u, point.u);
-                        const maxU = Math.max(refinementStart.u, point.u);
-                        const newMesh = addMeshline(mesh, 'horizontal', point.v, minU, maxU);
-                        setMesh(newMesh);
-                    } else {
-                        const minV = Math.min(refinementStart.v, point.v);
-                        const maxV = Math.max(refinementStart.v, point.v);
-                        const newMesh = addMeshline(mesh, 'vertical', point.u, minV, maxV);
-                        setMesh(newMesh);
-                    }
-                    setRefinementStart(null);
-                    setSelectedBSpline(null);
-                    setPeeledBSplines(null); // Clear peeled set when mesh changes
-                    setNestingLevels(null);
-                    setSelectedNestingLevel(null);
+                    return;
                 }
+
+                const direction = refinementStart.direction;
+                let nextMesh;
+
+                if (direction === 'horizontal') {
+                    const minU = Math.min(refinementStart.u, point.u);
+                    const maxU = Math.max(refinementStart.u, point.u);
+                    nextMesh = addMeshline(mesh, 'horizontal', point.v, minU, maxU);
+                } else {
+                    const minV = Math.min(refinementStart.v, point.v);
+                    const maxV = Math.max(refinementStart.v, point.v);
+                    nextMesh = addMeshline(mesh, 'vertical', point.u, minV, maxV);
+                }
+
+                resetMeshState(nextMesh);
             };
 
-            const validStartPoints = getValidStartPoints(mesh);
-            const validEndPoints = refinementStart 
-                ? getValidEndPoints(mesh, refinementStart)
-                : [];
+            const validStartPoints = useMemo(() => getValidStartPoints(mesh), [mesh]);
+            const validEndPoints = useMemo(() => (
+                refinementStart ? getValidEndPoints(mesh, refinementStart) : []
+            ), [mesh, refinementStart]);
 
             return (
                 <div className="container">
@@ -1078,32 +1103,18 @@
                         )}
 
                         <div className="control-group">
-                            {refinementStart && (
-                                <button onClick={() => setRefinementStart(null)}>
+                            {(refinementStart || selectedBSpline !== null) && (
+                                <button onClick={clearSelectionState}>
                                     Clear Selection
                                 </button>
                             )}
-                            <button onClick={() => {
-                                setShowGreville(!showGreville);
-                                if (!showGreville) {
-                                    setShowElementCounts(false);
-                                    setShowPeeledGreville(false);
-                                    setShowPeeledElementCounts(false);
-                                }
-                            }}>
+                            <button onClick={() => applyOverlayState(showGreville ? 'none' : 'greville')}>
                                 {showGreville ? 'Hide' : 'Show'} Greville Points
                             </button>
                             <button onClick={() => setShowRefinementPoints(!showRefinementPoints)}>
                                 {showRefinementPoints ? 'Hide' : 'Show'} Refinement Points
                             </button>
-                            <button onClick={() => {
-                                setShowElementCounts(!showElementCounts);
-                                if (!showElementCounts) {
-                                    setShowGreville(false);
-                                    setShowPeeledGreville(false);
-                                    setShowPeeledElementCounts(false);
-                                }
-                            }}>
+                            <button onClick={() => applyOverlayState(showElementCounts ? 'none' : 'elementCounts')}>
                                 {showElementCounts ? 'Hide' : 'Show'} Element Counts
                             </button>
                         </div>
@@ -1145,27 +1156,13 @@
                                 </>
                             )}
                             <button 
-                                onClick={() => {
-                                    setShowPeeledGreville(!showPeeledGreville);
-                                    if (!showPeeledGreville) {
-                                        setShowGreville(false);
-                                        setShowElementCounts(false);
-                                        setShowPeeledElementCounts(false);
-                                    }
-                                }}
+                                onClick={() => applyOverlayState(showPeeledGreville ? 'none' : 'peeledGreville')}
                                 disabled={!peeledBSplines}
                             >
                                 {showPeeledGreville ? 'Hide' : 'Show'} Peeled Greville
                             </button>
                             <button 
-                                onClick={() => {
-                                    setShowPeeledElementCounts(!showPeeledElementCounts);
-                                    if (!showPeeledElementCounts) {
-                                        setShowGreville(false);
-                                        setShowElementCounts(false);
-                                        setShowPeeledGreville(false);
-                                    }
-                                }}
+                                onClick={() => applyOverlayState(showPeeledElementCounts ? 'none' : 'peeledCounts')}
                                 disabled={!peeledBSplines}
                             >
                                 {showPeeledElementCounts ? 'Hide' : 'Show'} Peeled Element Counts
@@ -1570,6 +1567,14 @@
 
         const getNestingColor = (level) => {
             return NESTING_COLORS[level % NESTING_COLORS.length];
+        };
+
+        const OVERLAY_STATES = {
+            none: { greville: false, elementCounts: false, peeledGreville: false, peeledCounts: false },
+            greville: { greville: true, elementCounts: false, peeledGreville: false, peeledCounts: false },
+            elementCounts: { greville: false, elementCounts: true, peeledGreville: false, peeledCounts: false },
+            peeledGreville: { greville: false, elementCounts: false, peeledGreville: true, peeledCounts: false },
+            peeledCounts: { greville: false, elementCounts: false, peeledGreville: false, peeledCounts: true }
         };
 
         /**
