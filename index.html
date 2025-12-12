@@ -913,6 +913,7 @@
             const [showPeeledGreville, setShowPeeledGreville] = useState(false);
             const [showPeeledElementCounts, setShowPeeledElementCounts] = useState(false);
             const [showOnlyPeeled, setShowOnlyPeeled] = useState(false);
+            const [knotTuplePeeledRemove, setKnotTuplePeeledRemove] = useState(null);
             const [nestingLevels, setNestingLevels] = useState(null);
             const [selectedNestingLevel, setSelectedNestingLevel] = useState(null);
 
@@ -957,6 +958,14 @@
             const handleComputePeeled = () => {
                 const peeled = computePeeledSet(mesh.bsplines, mesh.elements);
                 setPeeledBSplines(peeled);
+                setKnotTuplePeeledRemove(null); // Clear knot tuple peeling when peeled set changes
+            };
+
+            // Compute knot tuple peeling (must be run after computing peeled set)
+            const handleComputeKnotTuplePeeling = () => {
+                if (!peeledBSplines) return;
+                const toRemove = computeKnotTuplePeeling(peeledBSplines);
+                setKnotTuplePeeledRemove(toRemove);
             };
 
             // Compute nesting levels
@@ -1164,6 +1173,21 @@
                         </div>
 
                         <div className="control-group">
+                            <label>Knot Tuple Peeling:</label>
+                            <button 
+                                onClick={handleComputeKnotTuplePeeling}
+                                disabled={!peeledBSplines}
+                            >
+                                Compute Knot Tuple Peeling
+                            </button>
+                            {knotTuplePeeledRemove && (
+                                <div style={{ fontSize: '12px', color: '#666', marginTop: '10px' }}>
+                                    To Remove: {knotTuplePeeledRemove.length} / {peeledBSplines.length} peeled B-splines
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="control-group">
                             <label>Nesting Levels:</label>
                             <button onClick={handleComputeNestingLevels}>
                                 Compute Nesting Levels
@@ -1231,6 +1255,7 @@
                                     .map((bspline, index) => {
                                         const level = nestingLevels ? nestingLevels.get(bspline.id) : null;
                                         const levelColor = level !== null ? getNestingColor(level) : null;
+                                        const isKnotTupleRemove = knotTuplePeeledRemove ? knotTuplePeeledRemove.includes(bspline) : false;
                                         return (
                                             <div
                                                 key={bspline.id}
@@ -1238,12 +1263,22 @@
                                                 style={{
                                                     borderLeftColor: levelColor || 'transparent',
                                                     borderLeftWidth: levelColor ? '4px' : '2px',
-                                                    borderLeftStyle: 'solid'
+                                                    borderLeftStyle: 'solid',
+                                                    background: isKnotTupleRemove ? '#ffebee' : undefined
                                                 }}
                                                 onClick={() => setSelectedBSpline(
                                                     selectedBSpline === bspline.id ? null : bspline.id
                                                 )}
                                             >
+                                                {isKnotTupleRemove && (
+                                                    <span style={{ 
+                                                        color: '#d32f2f', 
+                                                        fontWeight: 'bold',
+                                                        marginRight: '5px'
+                                                    }}>
+                                                        [KT-Remove]
+                                                    </span>
+                                                )}
                                                 {level !== null && (
                                                     <span style={{ 
                                                         color: levelColor, 
@@ -1389,6 +1424,66 @@
             }
             
             return peeledSet;
+        };
+
+        /**
+         * Knot Tuple Peeling Algorithm
+         * Removes B-splines from a sub-collection that have unique knot intersection points
+         * 
+         * @param {Array} subCollection - The sub-collection of B-splines to be peeled (already peeled set)
+         * @returns {Array} - The B-splines to be removed from the sub-collection
+         */
+        const computeKnotTuplePeeling = (subCollection) => {
+            const epsilon = 1e-10;
+            
+            // Helper function to check if two points are equal
+            const pointsEqual = (p1, p2) => {
+                return Math.abs(p1.u - p2.u) < epsilon && Math.abs(p1.v - p2.v) < epsilon;
+            };
+            
+            // Step 1: For each B-spline, collect its knot hyperplane intersection points
+            const bsplinePoints = new Map();
+            
+            for (const B of subCollection) {
+                const points = [];
+                // Compute Cartesian product of knot values (knot hyperplane intersections)
+                for (const u of B.knotsU) {
+                    for (const v of B.knotsV) {
+                        points.push({ u, v });
+                    }
+                }
+                bsplinePoints.set(B.id, points);
+            }
+            
+            // Step 2: Find B-splines with unique intersection points
+            const bsplinesRemove = [];
+            
+            for (const B of subCollection) {
+                const pointsB = bsplinePoints.get(B.id);
+                
+                // Find unique points (not in any other B-spline in the sub-collection)
+                const uniquePoints = pointsB.filter(pB => {
+                    // Check if this point exists in any other B-spline
+                    for (const Bprime of subCollection) {
+                        if (Bprime.id === B.id) continue; // Skip self
+                        
+                        const pointsBprime = bsplinePoints.get(Bprime.id);
+                        const existsInBprime = pointsBprime.some(p => pointsEqual(pB, p));
+                        
+                        if (existsInBprime) {
+                            return false; // This point is not unique
+                        }
+                    }
+                    return true; // This point is unique to B
+                });
+                
+                // If B has at least one unique point, add it to remove set
+                if (uniquePoints.length > 0) {
+                    bsplinesRemove.push(B);
+                }
+            }
+            
+            return bsplinesRemove;
         };
 
         /**
