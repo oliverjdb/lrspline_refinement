@@ -1468,7 +1468,7 @@
                     });
                 }
 
-                // Draw elements
+                // Draw elements (with transparency during refinement)
                 if (showElements) {
                     mesh.elements.forEach(el => {
                         const sizeU = el.uMax - el.uMin;
@@ -1476,7 +1476,12 @@
                         const sizeW = el.wMax - el.wMin;
                         const geo = new THREE.BoxGeometry(sizeU, sizeV, sizeW);
                         const edges = new THREE.EdgesGeometry(geo);
-                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x999999 }));
+                        const lineMat = new THREE.LineBasicMaterial({ 
+                            color: 0x999999,
+                            transparent: refinementStart ? true : false,
+                            opacity: refinementStart ? 0.1 : 1.0
+                        });
+                        const line = new THREE.LineSegments(edges, lineMat);
                         line.position.set(
                             (el.uMin + el.uMax) / 2,
                             (el.vMin + el.vMax) / 2,
@@ -1488,6 +1493,7 @@
                 }
 
                 // Draw B-spline supports (only selected, or all if showBSplineSupports is on)
+                // During refinement, make transparent to avoid occluding plane and points
                 mesh.bsplines.forEach(bspline => {
                     const support = bspline.getSupport();
                     const isSelected = selectedBSpline === bspline.id;
@@ -1504,7 +1510,7 @@
                         const mat = new THREE.MeshBasicMaterial({ 
                             color: 0xff6600, 
                             transparent: true, 
-                            opacity: 0.3
+                            opacity: refinementStart ? 0.05 : 0.3  // Very faint during refinement
                         });
                         const box = new THREE.Mesh(geo, mat);
                         box.position.set(
@@ -1516,7 +1522,12 @@
                         scene.add(box);
 
                         const edges = new THREE.EdgesGeometry(geo);
-                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xff6600, linewidth: 2 }));
+                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ 
+                            color: 0xff6600, 
+                            linewidth: 2,
+                            transparent: true,
+                            opacity: refinementStart ? 0.1 : 1.0  // Faint during refinement
+                        }));
                         line.position.copy(box.position);
                         line.userData.isMeshObject = true;
                         scene.add(line);
@@ -1556,40 +1567,7 @@
                     });
                 }
 
-                // Draw refinement points
-                if (showRefinementPoints && refinementPoints && refinementPoints.length > 0) {
-                    const pointSphereGeo = new THREE.SphereGeometry(0.012, 12, 12);
-                    refinementPoints.forEach((point, idx) => {
-                        const isStartPoint = refinementStart && 
-                            Math.abs(point.u - refinementStart.u) < 1e-10 &&
-                            Math.abs(point.v - refinementStart.v) < 1e-10 &&
-                            Math.abs(point.w - refinementStart.w) < 1e-10;
-                        
-                        const mat = new THREE.MeshBasicMaterial({ 
-                            color: isStartPoint ? 0xdc3545 : 0x007acc,
-                            transparent: true,
-                            opacity: isStartPoint ? 1.0 : 0.6
-                        });
-                        const sphere = new THREE.Mesh(pointSphereGeo, mat);
-                        sphere.position.set(point.u, point.v, point.w);
-                        sphere.userData.isMeshObject = true;
-                        sphere.userData.pointData = point;
-                        sphere.userData.isClickable = true;
-                        scene.add(sphere);
-                        clickablePointsRef.current.push(sphere);
-                    });
-                    
-                    // Also draw the start point if set
-                    if (refinementStart) {
-                        const startMat = new THREE.MeshBasicMaterial({ color: 0xdc3545 });
-                        const startSphere = new THREE.Mesh(pointSphereGeo, startMat);
-                        startSphere.position.set(refinementStart.u, refinementStart.v, refinementStart.w);
-                        startSphere.userData.isMeshObject = true;
-                        scene.add(startSphere);
-                    }
-                }
-
-                // Draw preview plane when start point is selected
+                // Draw preview plane when start point is selected (before refinement points)
                 if (refinementStart) {
                     const { u, v, w, normalAxis } = refinementStart;
                     let geometry, position;
@@ -1616,6 +1594,7 @@
                     const plane = new THREE.Mesh(geometry, material);
                     plane.position.copy(position);
                     plane.userData.isMeshObject = true;
+                    plane.renderOrder = 999;
                     scene.add(plane);
                     
                     // Add dashed outline
@@ -1629,7 +1608,119 @@
                     line.computeLineDistances();
                     line.position.copy(position);
                     line.userData.isMeshObject = true;
+                    line.renderOrder = 999;
                     scene.add(line);
+                    
+                    // Add grid lines showing element intersections with the plane
+                    // Draw actual element edges that intersect the refinement plane
+                    const gridLineMat = new THREE.LineBasicMaterial({ 
+                        color: 0x0056a3,  // Darker blue
+                        linewidth: 2,
+                        depthTest: false  // Always visible on top
+                    });
+                    const gridPoints = [];
+                    const epsilon = 1e-10;
+                    
+                    // Find elements that the plane passes through and draw their edges
+                    mesh.elements.forEach(el => {
+                        if (normalAxis === 'u') {
+                            // Plane at constant U: check if element spans this U value
+                            if (u >= el.uMin - epsilon && u <= el.uMax + epsilon) {
+                                // Draw the 4 edges of this element's face in the V-W plane
+                                // Bottom edge (vMin)
+                                gridPoints.push(new THREE.Vector3(u, el.vMin, el.wMin));
+                                gridPoints.push(new THREE.Vector3(u, el.vMin, el.wMax));
+                                // Top edge (vMax)
+                                gridPoints.push(new THREE.Vector3(u, el.vMax, el.wMin));
+                                gridPoints.push(new THREE.Vector3(u, el.vMax, el.wMax));
+                                // Left edge (wMin)
+                                gridPoints.push(new THREE.Vector3(u, el.vMin, el.wMin));
+                                gridPoints.push(new THREE.Vector3(u, el.vMax, el.wMin));
+                                // Right edge (wMax)
+                                gridPoints.push(new THREE.Vector3(u, el.vMin, el.wMax));
+                                gridPoints.push(new THREE.Vector3(u, el.vMax, el.wMax));
+                            }
+                        } else if (normalAxis === 'v') {
+                            // Plane at constant V: check if element spans this V value
+                            if (v >= el.vMin - epsilon && v <= el.vMax + epsilon) {
+                                // Draw the 4 edges of this element's face in the U-W plane
+                                // Bottom edge (uMin)
+                                gridPoints.push(new THREE.Vector3(el.uMin, v, el.wMin));
+                                gridPoints.push(new THREE.Vector3(el.uMin, v, el.wMax));
+                                // Top edge (uMax)
+                                gridPoints.push(new THREE.Vector3(el.uMax, v, el.wMin));
+                                gridPoints.push(new THREE.Vector3(el.uMax, v, el.wMax));
+                                // Left edge (wMin)
+                                gridPoints.push(new THREE.Vector3(el.uMin, v, el.wMin));
+                                gridPoints.push(new THREE.Vector3(el.uMax, v, el.wMin));
+                                // Right edge (wMax)
+                                gridPoints.push(new THREE.Vector3(el.uMin, v, el.wMax));
+                                gridPoints.push(new THREE.Vector3(el.uMax, v, el.wMax));
+                            }
+                        } else {
+                            // Plane at constant W: check if element spans this W value
+                            if (w >= el.wMin - epsilon && w <= el.wMax + epsilon) {
+                                // Draw the 4 edges of this element's face in the U-V plane
+                                // Bottom edge (uMin)
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMin, w));
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMax, w));
+                                // Top edge (uMax)
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMin, w));
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMax, w));
+                                // Left edge (vMin)
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMin, w));
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMin, w));
+                                // Right edge (vMax)
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMax, w));
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMax, w));
+                            }
+                        }
+                    });
+                    
+                    const gridGeometry = new THREE.BufferGeometry().setFromPoints(gridPoints);
+                    const gridLines = new THREE.LineSegments(gridGeometry, gridLineMat);
+                    gridLines.userData.isMeshObject = true;
+                    gridLines.renderOrder = 1000;  // Higher than plane, same as refinement points
+                    scene.add(gridLines);
+                }
+
+                // Draw refinement points LAST so they're always on top (most important when active)
+                if (showRefinementPoints && refinementPoints && refinementPoints.length > 0) {
+                    const pointSphereGeo = new THREE.SphereGeometry(0.012, 12, 12);
+                    refinementPoints.forEach((point, idx) => {
+                        const isStartPoint = refinementStart && 
+                            Math.abs(point.u - refinementStart.u) < 1e-10 &&
+                            Math.abs(point.v - refinementStart.v) < 1e-10 &&
+                            Math.abs(point.w - refinementStart.w) < 1e-10;
+                        
+                        const mat = new THREE.MeshBasicMaterial({ 
+                            color: isStartPoint ? 0xdc3545 : 0x007acc,
+                            transparent: true,
+                            opacity: isStartPoint ? 1.0 : 0.6,
+                            depthTest: false  // Always render on top
+                        });
+                        const sphere = new THREE.Mesh(pointSphereGeo, mat);
+                        sphere.position.set(point.u, point.v, point.w);
+                        sphere.userData.isMeshObject = true;
+                        sphere.userData.pointData = point;
+                        sphere.userData.isClickable = true;
+                        sphere.renderOrder = 1000;  // Highest priority
+                        scene.add(sphere);
+                        clickablePointsRef.current.push(sphere);
+                    });
+                    
+                    // Also draw the start point if set (extra emphasis)
+                    if (refinementStart) {
+                        const startMat = new THREE.MeshBasicMaterial({ 
+                            color: 0xdc3545,
+                            depthTest: false
+                        });
+                        const startSphere = new THREE.Mesh(pointSphereGeo, startMat);
+                        startSphere.position.set(refinementStart.u, refinementStart.v, refinementStart.w);
+                        startSphere.userData.isMeshObject = true;
+                        startSphere.renderOrder = 1001;  // Even higher than other refinement points
+                        scene.add(startSphere);
+                    }
                 }
 
             }, [mesh, selectedBSpline, showMeshfaces, showGreville, showElements, showBSplineSupports, refinementPoints, refinementStart, showRefinementPoints]);
@@ -1667,8 +1758,25 @@
                 refinementStart ? getValidEndPoints3D(mesh, refinementStart) : []
             ), [mesh, refinementStart]);
             
-            // Current points to display
-            const refinementPoints = refinementStart ? validEndPoints : validStartPoints;
+            // Filter points by selected B-spline if one is selected
+            const filterPointsByBSpline = (points) => {
+                if (!selectedBSpline) return points;
+                const bspline = mesh.bsplines.find(b => b.id === selectedBSpline);
+                if (!bspline) return points;
+                const support = bspline.getSupport();
+                const epsilon = 1e-10;
+                return points.filter(p => 
+                    p.u >= support.uMin - epsilon && p.u <= support.uMax + epsilon &&
+                    p.v >= support.vMin - epsilon && p.v <= support.vMax + epsilon &&
+                    p.w >= support.wMin - epsilon && p.w <= support.wMax + epsilon
+                );
+            };
+            
+            // Current points to display (filtered by B-spline if selected)
+            const refinementPoints = useMemo(() => {
+                const points = refinementStart ? validEndPoints : validStartPoints;
+                return filterPointsByBSpline(points);
+            }, [refinementStart, validStartPoints, validEndPoints, selectedBSpline, mesh]);
 
             const handleReset = () => {
                 setMesh(createMesh3D(degreeU, degreeV, degreeW, numElementsU, numElementsV, numElementsW));
