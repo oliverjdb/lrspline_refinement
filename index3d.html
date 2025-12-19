@@ -1,0 +1,1879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LR B-Spline Refinement Visualization (3D)</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .controls {
+            width: 320px;
+            background: white;
+            padding: 20px;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            overflow-y: auto;
+        }
+        .visualization {
+            flex: 1;
+            position: relative;
+        }
+        #threejs-canvas {
+            width: 100%;
+            height: 100%;
+        }
+        h2 {
+            margin-top: 0;
+            color: #333;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #666;
+            font-weight: 500;
+            font-size: 13px;
+        }
+        input[type="range"] {
+            width: 100%;
+            margin-bottom: 5px;
+        }
+        button {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            background: #007acc;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #005a9e;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .info {
+            background: #e3f2fd;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #1976d2;
+            margin-bottom: 15px;
+        }
+        .stats {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .bspline-item {
+            padding: 4px 6px;
+            margin: 2px 0;
+            border-radius: 3px;
+            font-size: 10px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            font-family: monospace;
+        }
+        .bspline-item:hover {
+            background: #f0f0f0;
+        }
+        .bspline-item.selected {
+            border-color: #007acc;
+            background: #e3f2fd;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .checkbox-group input {
+            width: auto;
+            margin: 0;
+        }
+        .checkbox-group label {
+            margin: 0;
+            font-weight: normal;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        
+        // Make THREE available globally for the Babel script
+        window.THREE = THREE;
+        window.OrbitControls = OrbitControls;
+        
+        // Signal that Three.js is loaded
+        window.dispatchEvent(new Event('three-loaded'));
+    </script>
+
+    <script type="text/babel">
+        const { useState, useMemo, useCallback, useEffect, useRef } = React;
+
+        let nextBSplineId = 0;
+        const generateBSplineId = () => nextBSplineId++;
+        const resetBSplineIdCounter = () => { nextBSplineId = 0; };
+
+        /**
+         * LRBSpline3D class - represents a single LR B-spline in 3D
+         * Knot vectors have distinct values (no multiplicity)
+         */
+        class LRBSpline3D {
+            constructor(knotsU, knotsV, knotsW, id = null) {
+                this.id = id !== null ? id : generateBSplineId();
+                this.knotsU = [...knotsU];
+                this.knotsV = [...knotsV];
+                this.knotsW = [...knotsW];
+            }
+
+            /**
+             * Get the support of this B-spline (3D bounding box)
+             */
+            getSupport() {
+                return {
+                    uMin: this.knotsU[0],
+                    uMax: this.knotsU[this.knotsU.length - 1],
+                    vMin: this.knotsV[0],
+                    vMax: this.knotsV[this.knotsV.length - 1],
+                    wMin: this.knotsW[0],
+                    wMax: this.knotsW[this.knotsW.length - 1]
+                };
+            }
+
+            /**
+             * Calculate the Greville point (average of interior knots) in 3D
+             * For degree p with p+2 knots, Greville point is average of middle p knots
+             */
+            getGrevillePoint() {
+                const degreeU = this.knotsU.length - 2;
+                const degreeV = this.knotsV.length - 2;
+                const degreeW = this.knotsW.length - 2;
+                
+                // Average of interior knots (exclude first and last)
+                let u = 0;
+                for (let i = 1; i <= degreeU; i++) {
+                    u += this.knotsU[i];
+                }
+                u /= degreeU;
+                
+                let v = 0;
+                for (let i = 1; i <= degreeV; i++) {
+                    v += this.knotsV[i];
+                }
+                v /= degreeV;
+                
+                let w = 0;
+                for (let i = 1; i <= degreeW; i++) {
+                    w += this.knotsW[i];
+                }
+                w /= degreeW;
+                
+                return { u, v, w };
+            }
+
+            /**
+             * Split B-spline by inserting a new knot in U direction
+             * Returns two new B-splines
+             */
+            splitU(newKnot) {
+                const epsilon = 1e-10;
+                const degreeU = this.knotsU.length - 2;
+                
+                const newKnotsU = [...this.knotsU];
+                let insertIdx = newKnotsU.findIndex(k => k > newKnot - epsilon);
+                if (insertIdx === -1) insertIdx = newKnotsU.length;
+                newKnotsU.splice(insertIdx, 0, newKnot);
+                
+                const bspline1 = new LRBSpline3D(
+                    newKnotsU.slice(0, degreeU + 2),
+                    this.knotsV,
+                    this.knotsW
+                );
+                const bspline2 = new LRBSpline3D(
+                    newKnotsU.slice(1, degreeU + 3),
+                    this.knotsV,
+                    this.knotsW
+                );
+                
+                return [bspline1, bspline2];
+            }
+
+            /**
+             * Split B-spline by inserting a new knot in V direction
+             * Returns two new B-splines
+             */
+            splitV(newKnot) {
+                const epsilon = 1e-10;
+                const degreeV = this.knotsV.length - 2;
+                
+                const newKnotsV = [...this.knotsV];
+                let insertIdx = newKnotsV.findIndex(k => k > newKnot - epsilon);
+                if (insertIdx === -1) insertIdx = newKnotsV.length;
+                newKnotsV.splice(insertIdx, 0, newKnot);
+                
+                const bspline1 = new LRBSpline3D(
+                    this.knotsU,
+                    newKnotsV.slice(0, degreeV + 2),
+                    this.knotsW
+                );
+                const bspline2 = new LRBSpline3D(
+                    this.knotsU,
+                    newKnotsV.slice(1, degreeV + 3),
+                    this.knotsW
+                );
+                
+                return [bspline1, bspline2];
+            }
+
+            /**
+             * Split B-spline by inserting a new knot in W direction
+             * Returns two new B-splines
+             */
+            splitW(newKnot) {
+                const epsilon = 1e-10;
+                const degreeW = this.knotsW.length - 2;
+                
+                const newKnotsW = [...this.knotsW];
+                let insertIdx = newKnotsW.findIndex(k => k > newKnot - epsilon);
+                if (insertIdx === -1) insertIdx = newKnotsW.length;
+                newKnotsW.splice(insertIdx, 0, newKnot);
+                
+                const bspline1 = new LRBSpline3D(
+                    this.knotsU,
+                    this.knotsV,
+                    newKnotsW.slice(0, degreeW + 2)
+                );
+                const bspline2 = new LRBSpline3D(
+                    this.knotsU,
+                    this.knotsV,
+                    newKnotsW.slice(1, degreeW + 3)
+                );
+                
+                return [bspline1, bspline2];
+            }
+        }
+
+        /**
+         * Meshface class - represents a single mesh face (plane segment) in the 3D LR mesh
+         * 
+         * In 3D, meshlines become mesh faces (rectangular planar regions).
+         * Each face is perpendicular to one of the axes (U, V, or W).
+         * 
+         * - normalAxis: 'u', 'v', or 'w' - the axis perpendicular to this face
+         * - constant: the fixed coordinate along the normal axis
+         * - For a face perpendicular to U (normalAxis='u'):
+         *   - constant = u position
+         *   - The face spans [vStart, vEnd] x [wStart, wEnd]
+         * - For a face perpendicular to V (normalAxis='v'):
+         *   - constant = v position
+         *   - The face spans [uStart, uEnd] x [wStart, wEnd]
+         * - For a face perpendicular to W (normalAxis='w'):
+         *   - constant = w position
+         *   - The face spans [uStart, uEnd] x [vStart, vEnd]
+         */
+        class Meshface {
+            constructor(normalAxis, constant, span1Start, span1End, span2Start, span2End, id) {
+                this.normalAxis = normalAxis;  // 'u', 'v', or 'w'
+                this.constant = constant;      // the fixed coordinate along normalAxis
+                this.id = id;                  // unique identifier
+                
+                // Store spans based on normal axis
+                // We use a consistent naming: first span is the "lower" axis, second is "higher"
+                // u < v < w in terms of ordering
+                if (normalAxis === 'u') {
+                    // Face perpendicular to U: spans V and W
+                    this.vStart = span1Start;
+                    this.vEnd = span1End;
+                    this.wStart = span2Start;
+                    this.wEnd = span2End;
+                } else if (normalAxis === 'v') {
+                    // Face perpendicular to V: spans U and W
+                    this.uStart = span1Start;
+                    this.uEnd = span1End;
+                    this.wStart = span2Start;
+                    this.wEnd = span2End;
+                } else { // normalAxis === 'w'
+                    // Face perpendicular to W: spans U and V
+                    this.uStart = span1Start;
+                    this.uEnd = span1End;
+                    this.vStart = span2Start;
+                    this.vEnd = span2End;
+                }
+            }
+
+            /**
+             * Get the spans of this face in the two directions it spans
+             * Returns { axis1, start1, end1, axis2, start2, end2 }
+             */
+            getSpans() {
+                if (this.normalAxis === 'u') {
+                    return {
+                        axis1: 'v', start1: this.vStart, end1: this.vEnd,
+                        axis2: 'w', start2: this.wStart, end2: this.wEnd
+                    };
+                } else if (this.normalAxis === 'v') {
+                    return {
+                        axis1: 'u', start1: this.uStart, end1: this.uEnd,
+                        axis2: 'w', start2: this.wStart, end2: this.wEnd
+                    };
+                } else {
+                    return {
+                        axis1: 'u', start1: this.uStart, end1: this.uEnd,
+                        axis2: 'v', start2: this.vStart, end2: this.vEnd
+                    };
+                }
+            }
+
+            /**
+             * Get the bounding box of this face
+             */
+            getBounds() {
+                if (this.normalAxis === 'u') {
+                    return {
+                        uMin: this.constant, uMax: this.constant,
+                        vMin: this.vStart, vMax: this.vEnd,
+                        wMin: this.wStart, wMax: this.wEnd
+                    };
+                } else if (this.normalAxis === 'v') {
+                    return {
+                        uMin: this.uStart, uMax: this.uEnd,
+                        vMin: this.constant, vMax: this.constant,
+                        wMin: this.wStart, wMax: this.wEnd
+                    };
+                } else {
+                    return {
+                        uMin: this.uStart, uMax: this.uEnd,
+                        vMin: this.vStart, vMax: this.vEnd,
+                        wMin: this.constant, wMax: this.constant
+                    };
+                }
+            }
+
+            /**
+             * Check if this face contains a point (u, v, w)
+             */
+            containsPoint(u, v, w) {
+                const epsilon = 1e-10;
+                const bounds = this.getBounds();
+                
+                return u >= bounds.uMin - epsilon && u <= bounds.uMax + epsilon &&
+                       v >= bounds.vMin - epsilon && v <= bounds.vMax + epsilon &&
+                       w >= bounds.wMin - epsilon && w <= bounds.wMax + epsilon;
+            }
+
+            /**
+             * Check if this face fully covers another face's extent
+             * (used for merging adjacent/overlapping faces)
+             */
+            covers(other) {
+                if (this.normalAxis !== other.normalAxis) return false;
+                
+                const epsilon = 1e-10;
+                if (Math.abs(this.constant - other.constant) > epsilon) return false;
+                
+                const thisSpans = this.getSpans();
+                const otherSpans = other.getSpans();
+                
+                return thisSpans.start1 <= otherSpans.start1 + epsilon &&
+                       thisSpans.end1 >= otherSpans.end1 - epsilon &&
+                       thisSpans.start2 <= otherSpans.start2 + epsilon &&
+                       thisSpans.end2 >= otherSpans.end2 - epsilon;
+            }
+        }
+
+        /**
+         * Check if a meshface exists at the given position that covers the specified region
+         */
+        const meshfaceExists = (mesh, normalAxis, constant, span1Start, span1End, span2Start, span2End) => {
+            const epsilon = 1e-10;
+            return mesh.meshfaces.some(face => {
+                if (face.normalAxis !== normalAxis) return false;
+                if (Math.abs(face.constant - constant) > epsilon) return false;
+                
+                const spans = face.getSpans();
+                return spans.start1 <= span1Start + epsilon &&
+                       spans.end1 >= span1End - epsilon &&
+                       spans.start2 <= span2Start + epsilon &&
+                       spans.end2 >= span2End - epsilon;
+            });
+        };
+
+        /**
+         * Try to merge a new meshface with existing coplanar meshfaces
+         * This handles extending T-junctions in 3D
+         * Returns { meshfaces, wasNewFace }
+         */
+        const mergeOrAddMeshface = (meshfaces, normalAxis, constant, span1Start, span1End, span2Start, span2End, nextId) => {
+            const epsilon = 1e-10;
+            const nonCoplanar = [];
+            const coplanar = [];
+            
+            // Separate coplanar and non-coplanar meshfaces
+            for (const face of meshfaces) {
+                if (face.normalAxis === normalAxis && 
+                    Math.abs(face.constant - constant) < epsilon) {
+                    coplanar.push(face);
+                } else {
+                    nonCoplanar.push(face);
+                }
+            }
+            
+            // Start with the new face region
+            let mergedSpan1Start = span1Start;
+            let mergedSpan1End = span1End;
+            let mergedSpan2Start = span2Start;
+            let mergedSpan2End = span2End;
+            let mergedId = nextId;
+            let anyMerged = false;
+            const keptCoplanar = [];
+            
+            // Try to merge with each coplanar face
+            // Two faces can merge if they share an edge (adjacent in one direction, same extent in other)
+            for (const face of coplanar) {
+                const spans = face.getSpans();
+                
+                // Check if faces can be merged
+                // They must overlap or be adjacent in both span directions
+                const overlap1 = mergedSpan1Start <= spans.end1 + epsilon && 
+                                mergedSpan1End >= spans.start1 - epsilon;
+                const overlap2 = mergedSpan2Start <= spans.end2 + epsilon && 
+                                mergedSpan2End >= spans.start2 - epsilon;
+                
+                if (overlap1 && overlap2) {
+                    // Merge by taking the union
+                    mergedSpan1Start = Math.min(mergedSpan1Start, spans.start1);
+                    mergedSpan1End = Math.max(mergedSpan1End, spans.end1);
+                    mergedSpan2Start = Math.min(mergedSpan2Start, spans.start2);
+                    mergedSpan2End = Math.max(mergedSpan2End, spans.end2);
+                    if (!anyMerged) {
+                        mergedId = face.id; // Keep the first merged face's ID
+                    }
+                    anyMerged = true;
+                } else {
+                    // Keep this face separate
+                    keptCoplanar.push(face);
+                }
+            }
+            
+            // Build result
+            const result = [
+                ...nonCoplanar,
+                ...keptCoplanar,
+                new Meshface(normalAxis, constant, mergedSpan1Start, mergedSpan1End, mergedSpan2Start, mergedSpan2End, mergedId)
+            ];
+            
+            return { meshfaces: result, wasNewFace: !anyMerged };
+        };
+
+        /**
+         * Count how many times a knot value appears in a knot vector
+         */
+        const countKnotInVector = (knotVector, knotValue) => {
+            const epsilon = 1e-10;
+            let count = 0;
+            for (const k of knotVector) {
+                if (Math.abs(k - knotValue) < epsilon) {
+                    count++;
+                }
+            }
+            return count;
+        };
+
+        /**
+         * Check if a meshface splits a B-spline
+         * A meshface splits a B-spline if:
+         * 1. The constant coordinate is strictly inside the B-spline's support in that direction
+         * 2. The meshface spans the entire support of the B-spline in the other two directions
+         * 3. The knot value doesn't already exist in the B-spline's local knot vector
+         */
+        const meshfaceSplitsBSpline = (meshface, bspline, multiplicity = 1) => {
+            const epsilon = 1e-10;
+            const support = bspline.getSupport();
+            
+            if (meshface.normalAxis === 'u') {
+                // Face perpendicular to U: check if u is strictly inside
+                const uInside = meshface.constant > support.uMin + epsilon && 
+                               meshface.constant < support.uMax - epsilon;
+                // Check if face spans the entire v and w support
+                const vSpans = meshface.vStart <= support.vMin + epsilon && 
+                              meshface.vEnd >= support.vMax - epsilon;
+                const wSpans = meshface.wStart <= support.wMin + epsilon && 
+                              meshface.wEnd >= support.wMax - epsilon;
+                
+                if (!uInside || !vSpans || !wSpans) return false;
+                
+                // Check if the knot already exists
+                const nKnots = countKnotInVector(bspline.knotsU, meshface.constant);
+                return nKnots < multiplicity;
+                
+            } else if (meshface.normalAxis === 'v') {
+                // Face perpendicular to V: check if v is strictly inside
+                const vInside = meshface.constant > support.vMin + epsilon && 
+                               meshface.constant < support.vMax - epsilon;
+                // Check if face spans the entire u and w support
+                const uSpans = meshface.uStart <= support.uMin + epsilon && 
+                              meshface.uEnd >= support.uMax - epsilon;
+                const wSpans = meshface.wStart <= support.wMin + epsilon && 
+                              meshface.wEnd >= support.wMax - epsilon;
+                
+                if (!vInside || !uSpans || !wSpans) return false;
+                
+                // Check if the knot already exists
+                const nKnots = countKnotInVector(bspline.knotsV, meshface.constant);
+                return nKnots < multiplicity;
+                
+            } else { // normalAxis === 'w'
+                // Face perpendicular to W: check if w is strictly inside
+                const wInside = meshface.constant > support.wMin + epsilon && 
+                               meshface.constant < support.wMax - epsilon;
+                // Check if face spans the entire u and v support
+                const uSpans = meshface.uStart <= support.uMin + epsilon && 
+                              meshface.uEnd >= support.uMax - epsilon;
+                const vSpans = meshface.vStart <= support.vMin + epsilon && 
+                              meshface.vEnd >= support.vMax - epsilon;
+                
+                if (!wInside || !uSpans || !vSpans) return false;
+                
+                // Check if the knot already exists
+                const nKnots = countKnotInVector(bspline.knotsW, meshface.constant);
+                return nKnots < multiplicity;
+            }
+        };
+
+        /**
+         * Split a B-spline by a meshface and return the resulting B-splines
+         */
+        const splitBSplineByMeshface = (bspline, meshface) => {
+            if (meshface.normalAxis === 'u') {
+                return bspline.splitU(meshface.constant);
+            } else if (meshface.normalAxis === 'v') {
+                return bspline.splitV(meshface.constant);
+            } else {
+                return bspline.splitW(meshface.constant);
+            }
+        };
+
+        /**
+         * Check if two 3D B-splines are identical (same knot vectors)
+         */
+        const areBSplines3DEqual = (bspline1, bspline2) => {
+            const epsilon = 1e-10;
+            
+            if (bspline1.knotsU.length !== bspline2.knotsU.length ||
+                bspline1.knotsV.length !== bspline2.knotsV.length ||
+                bspline1.knotsW.length !== bspline2.knotsW.length) {
+                return false;
+            }
+            
+            for (let i = 0; i < bspline1.knotsU.length; i++) {
+                if (Math.abs(bspline1.knotsU[i] - bspline2.knotsU[i]) > epsilon) {
+                    return false;
+                }
+            }
+            
+            for (let i = 0; i < bspline1.knotsV.length; i++) {
+                if (Math.abs(bspline1.knotsV[i] - bspline2.knotsV[i]) > epsilon) {
+                    return false;
+                }
+            }
+            
+            for (let i = 0; i < bspline1.knotsW.length; i++) {
+                if (Math.abs(bspline1.knotsW[i] - bspline2.knotsW[i]) > epsilon) {
+                    return false;
+                }
+            }
+            
+            return true;
+        };
+
+        /**
+         * Remove duplicate 3D B-splines from the list
+         */
+        const removeDuplicateBSplines3D = (bsplines) => {
+            const unique = [];
+            
+            for (const bspline of bsplines) {
+                const isDuplicate = unique.some(existing => areBSplines3DEqual(existing, bspline));
+                if (!isDuplicate) {
+                    unique.push(bspline);
+                }
+            }
+            
+            return unique;
+        };
+
+        /**
+         * Element3D class - represents a 3D element (hexahedral box) in the LR mesh
+         * Elements are axis-aligned boxes defined by their min/max coordinates
+         */
+        class Element3D {
+            constructor(uMin, uMax, vMin, vMax, wMin, wMax) {
+                this.uMin = uMin;
+                this.uMax = uMax;
+                this.vMin = vMin;
+                this.vMax = vMax;
+                this.wMin = wMin;
+                this.wMax = wMax;
+            }
+
+            /**
+             * Get the center point of this element
+             */
+            getCenter() {
+                return {
+                    u: (this.uMin + this.uMax) / 2,
+                    v: (this.vMin + this.vMax) / 2,
+                    w: (this.wMin + this.wMax) / 2
+                };
+            }
+
+            /**
+             * Get the dimensions of this element
+             */
+            getDimensions() {
+                return {
+                    du: this.uMax - this.uMin,
+                    dv: this.vMax - this.vMin,
+                    dw: this.wMax - this.wMin
+                };
+            }
+
+            /**
+             * Get the volume of this element
+             */
+            getVolume() {
+                const dims = this.getDimensions();
+                return dims.du * dims.dv * dims.dw;
+            }
+
+            /**
+             * Check if a point is inside this element
+             */
+            containsPoint(u, v, w) {
+                const epsilon = 1e-10;
+                return u >= this.uMin - epsilon && u <= this.uMax + epsilon &&
+                       v >= this.vMin - epsilon && v <= this.vMax + epsilon &&
+                       w >= this.wMin - epsilon && w <= this.wMax + epsilon;
+            }
+
+            /**
+             * Check if this element is contained within a B-spline's support
+             */
+            isContainedInSupport(support) {
+                const epsilon = 1e-10;
+                return support.uMin <= this.uMin + epsilon &&
+                       support.uMax >= this.uMax - epsilon &&
+                       support.vMin <= this.vMin + epsilon &&
+                       support.vMax >= this.vMax - epsilon &&
+                       support.wMin <= this.wMin + epsilon &&
+                       support.wMax >= this.wMax - epsilon;
+            }
+
+            /**
+             * Check if a meshface passes through the interior of this element
+             * (can split the element)
+             */
+            isSplitByMeshface(meshface) {
+                const epsilon = 1e-10;
+                
+                if (meshface.normalAxis === 'u') {
+                    // Face perpendicular to U: check if constant is strictly inside u range
+                    // and face spans the element's v and w extent
+                    const uInside = meshface.constant > this.uMin + epsilon && 
+                                   meshface.constant < this.uMax - epsilon;
+                    const vSpans = meshface.vStart <= this.vMin + epsilon && 
+                                  meshface.vEnd >= this.vMax - epsilon;
+                    const wSpans = meshface.wStart <= this.wMin + epsilon && 
+                                  meshface.wEnd >= this.wMax - epsilon;
+                    return uInside && vSpans && wSpans;
+                    
+                } else if (meshface.normalAxis === 'v') {
+                    // Face perpendicular to V
+                    const vInside = meshface.constant > this.vMin + epsilon && 
+                                   meshface.constant < this.vMax - epsilon;
+                    const uSpans = meshface.uStart <= this.uMin + epsilon && 
+                                  meshface.uEnd >= this.uMax - epsilon;
+                    const wSpans = meshface.wStart <= this.wMin + epsilon && 
+                                  meshface.wEnd >= this.wMax - epsilon;
+                    return vInside && uSpans && wSpans;
+                    
+                } else { // normalAxis === 'w'
+                    // Face perpendicular to W
+                    const wInside = meshface.constant > this.wMin + epsilon && 
+                                   meshface.constant < this.wMax - epsilon;
+                    const uSpans = meshface.uStart <= this.uMin + epsilon && 
+                                  meshface.uEnd >= this.uMax - epsilon;
+                    const vSpans = meshface.vStart <= this.vMin + epsilon && 
+                                  meshface.vEnd >= this.vMax - epsilon;
+                    return wInside && uSpans && vSpans;
+                }
+            }
+
+            /**
+             * Split this element by a meshface
+             * Returns two new elements if split occurs, otherwise returns [this]
+             */
+            splitByMeshface(meshface) {
+                if (!this.isSplitByMeshface(meshface)) {
+                    return [this];
+                }
+                
+                if (meshface.normalAxis === 'u') {
+                    return [
+                        new Element3D(this.uMin, meshface.constant, this.vMin, this.vMax, this.wMin, this.wMax),
+                        new Element3D(meshface.constant, this.uMax, this.vMin, this.vMax, this.wMin, this.wMax)
+                    ];
+                } else if (meshface.normalAxis === 'v') {
+                    return [
+                        new Element3D(this.uMin, this.uMax, this.vMin, meshface.constant, this.wMin, this.wMax),
+                        new Element3D(this.uMin, this.uMax, meshface.constant, this.vMax, this.wMin, this.wMax)
+                    ];
+                } else {
+                    return [
+                        new Element3D(this.uMin, this.uMax, this.vMin, this.vMax, this.wMin, meshface.constant),
+                        new Element3D(this.uMin, this.uMax, this.vMin, this.vMax, meshface.constant, this.wMax)
+                    ];
+                }
+            }
+
+            /**
+             * Create a plain object representation (for compatibility)
+             */
+            toObject() {
+                return {
+                    uMin: this.uMin,
+                    uMax: this.uMax,
+                    vMin: this.vMin,
+                    vMax: this.vMax,
+                    wMin: this.wMin,
+                    wMax: this.wMax
+                };
+            }
+        }
+
+        /**
+         * Get valid start points for refinement in 3D
+         * A valid start point is on an existing meshface where a new perpendicular meshface can begin
+         * 
+         * For a refinement with normal axis 'axis', valid start points are on meshfaces 
+         * perpendicular to one of the OTHER two axes, at positions where the 'axis' coordinate
+         * lies between existing knots.
+         * 
+         * Returns array of { u, v, w, normalAxis } where normalAxis is the axis for the new meshface
+         */
+        const getValidStartPoints3D = (mesh, normalAxis) => {
+            const epsilon = 1e-10;
+            const points = [];
+            
+            const pointExists = (u, v, w) => {
+                return points.some(p => 
+                    Math.abs(p.u - u) < epsilon && 
+                    Math.abs(p.v - v) < epsilon && 
+                    Math.abs(p.w - w) < epsilon
+                );
+            };
+            
+            // Get global knots for each axis
+            const knotsU = Array.from(mesh.globalKnotsU).sort((a, b) => a - b);
+            const knotsV = Array.from(mesh.globalKnotsV).sort((a, b) => a - b);
+            const knotsW = Array.from(mesh.globalKnotsW).sort((a, b) => a - b);
+            
+            // For normal axis 'u', we need points where u is at a midpoint between knots
+            // and the point lies on existing meshfaces perpendicular to V or W
+            if (normalAxis === 'u') {
+                // Find midpoints in U direction
+                const midpointsU = [];
+                for (let i = 0; i < knotsU.length - 1; i++) {
+                    midpointsU.push((knotsU[i] + knotsU[i + 1]) / 2);
+                }
+                
+                // Look for points on V-perpendicular meshfaces
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'v') {
+                        const v = face.constant;
+                        // For each midpoint in U and knot in W
+                        for (const u of midpointsU) {
+                            if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                for (const w of knotsW) {
+                                    if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                        if (!pointExists(u, v, w)) {
+                                            points.push({ u, v, w, normalAxis: 'u' });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Look for points on W-perpendicular meshfaces
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'w') {
+                        const w = face.constant;
+                        // For each midpoint in U and knot in V
+                        for (const u of midpointsU) {
+                            if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                for (const v of knotsV) {
+                                    if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                        if (!pointExists(u, v, w)) {
+                                            points.push({ u, v, w, normalAxis: 'u' });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (normalAxis === 'v') {
+                // Find midpoints in V direction
+                const midpointsV = [];
+                for (let i = 0; i < knotsV.length - 1; i++) {
+                    midpointsV.push((knotsV[i] + knotsV[i + 1]) / 2);
+                }
+                
+                // Look for points on U-perpendicular meshfaces
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'u') {
+                        const u = face.constant;
+                        for (const v of midpointsV) {
+                            if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                for (const w of knotsW) {
+                                    if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                        if (!pointExists(u, v, w)) {
+                                            points.push({ u, v, w, normalAxis: 'v' });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Look for points on W-perpendicular meshfaces
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'w') {
+                        const w = face.constant;
+                        for (const v of midpointsV) {
+                            if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                for (const u of knotsU) {
+                                    if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                        if (!pointExists(u, v, w)) {
+                                            points.push({ u, v, w, normalAxis: 'v' });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else { // normalAxis === 'w'
+                // Find midpoints in W direction
+                const midpointsW = [];
+                for (let i = 0; i < knotsW.length - 1; i++) {
+                    midpointsW.push((knotsW[i] + knotsW[i + 1]) / 2);
+                }
+                
+                // Look for points on U-perpendicular meshfaces
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'u') {
+                        const u = face.constant;
+                        for (const w of midpointsW) {
+                            if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                for (const v of knotsV) {
+                                    if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                        if (!pointExists(u, v, w)) {
+                                            points.push({ u, v, w, normalAxis: 'w' });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Look for points on V-perpendicular meshfaces
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'v') {
+                        const v = face.constant;
+                        for (const w of midpointsW) {
+                            if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                for (const u of knotsU) {
+                                    if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                        if (!pointExists(u, v, w)) {
+                                            points.push({ u, v, w, normalAxis: 'w' });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return points;
+        };
+
+        /**
+         * Get valid end points given a start point for 3D refinement
+         * The end point completes the rectangular region of the meshface
+         * It must be on an existing meshface that intersects the plane defined by the start point
+         */
+        const getValidEndPoints3D = (mesh, startPoint) => {
+            const epsilon = 1e-10;
+            const points = [];
+            const { u: startU, v: startV, w: startW, normalAxis } = startPoint;
+            
+            const pointExists = (u, v, w) => {
+                return points.some(p => 
+                    Math.abs(p.u - u) < epsilon && 
+                    Math.abs(p.v - v) < epsilon && 
+                    Math.abs(p.w - w) < epsilon
+                );
+            };
+            
+            const knotsU = Array.from(mesh.globalKnotsU).sort((a, b) => a - b);
+            const knotsV = Array.from(mesh.globalKnotsV).sort((a, b) => a - b);
+            const knotsW = Array.from(mesh.globalKnotsW).sort((a, b) => a - b);
+            
+            if (normalAxis === 'u') {
+                // The meshface is at u = startU, we need to find valid corners in the V-W plane
+                // End point must be different from start in both v and w
+                
+                // Look for points on V-perpendicular meshfaces at u = startU
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'v' && 
+                        startU >= face.uStart - epsilon && startU <= face.uEnd + epsilon) {
+                        const v = face.constant;
+                        if (Math.abs(v - startV) > epsilon) {
+                            for (const w of knotsW) {
+                                if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon &&
+                                    Math.abs(w - startW) > epsilon) {
+                                    if (!pointExists(startU, v, w)) {
+                                        points.push({ u: startU, v, w, normalAxis: 'u' });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Look for points on W-perpendicular meshfaces at u = startU
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'w' && 
+                        startU >= face.uStart - epsilon && startU <= face.uEnd + epsilon) {
+                        const w = face.constant;
+                        if (Math.abs(w - startW) > epsilon) {
+                            for (const v of knotsV) {
+                                if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon &&
+                                    Math.abs(v - startV) > epsilon) {
+                                    if (!pointExists(startU, v, w)) {
+                                        points.push({ u: startU, v, w, normalAxis: 'u' });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (normalAxis === 'v') {
+                // The meshface is at v = startV, we need to find valid corners in the U-W plane
+                
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'u' && 
+                        startV >= face.vStart - epsilon && startV <= face.vEnd + epsilon) {
+                        const u = face.constant;
+                        if (Math.abs(u - startU) > epsilon) {
+                            for (const w of knotsW) {
+                                if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon &&
+                                    Math.abs(w - startW) > epsilon) {
+                                    if (!pointExists(u, startV, w)) {
+                                        points.push({ u, v: startV, w, normalAxis: 'v' });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'w' && 
+                        startV >= face.vStart - epsilon && startV <= face.vEnd + epsilon) {
+                        const w = face.constant;
+                        if (Math.abs(w - startW) > epsilon) {
+                            for (const u of knotsU) {
+                                if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon &&
+                                    Math.abs(u - startU) > epsilon) {
+                                    if (!pointExists(u, startV, w)) {
+                                        points.push({ u, v: startV, w, normalAxis: 'v' });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else { // normalAxis === 'w'
+                // The meshface is at w = startW, we need to find valid corners in the U-V plane
+                
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'u' && 
+                        startW >= face.wStart - epsilon && startW <= face.wEnd + epsilon) {
+                        const u = face.constant;
+                        if (Math.abs(u - startU) > epsilon) {
+                            for (const v of knotsV) {
+                                if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon &&
+                                    Math.abs(v - startV) > epsilon) {
+                                    if (!pointExists(u, v, startW)) {
+                                        points.push({ u, v, w: startW, normalAxis: 'w' });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'v' && 
+                        startW >= face.wStart - epsilon && startW <= face.wEnd + epsilon) {
+                        const v = face.constant;
+                        if (Math.abs(v - startV) > epsilon) {
+                            for (const u of knotsU) {
+                                if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon &&
+                                    Math.abs(u - startU) > epsilon) {
+                                    if (!pointExists(u, v, startW)) {
+                                        points.push({ u, v, w: startW, normalAxis: 'w' });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return points;
+        };
+
+        /**
+         * Count B-splines covering each 3D element
+         */
+        const countBSplinesInElements3D = (bsplines, elements) => {
+            return elements.map(element => {
+                let count = 0;
+                for (const bspline of bsplines) {
+                    const support = bspline.getSupport();
+                    if (element.isContainedInSupport(support)) {
+                        count++;
+                    }
+                }
+                return { element, count };
+            });
+        };
+
+        /**
+         * Get B-splines covering a 3D element
+         */
+        const getBSplinesCoveringElement3D = (bsplines, element) => {
+            return bsplines.filter(bspline => {
+                const support = bspline.getSupport();
+                return element.isContainedInSupport(support);
+            });
+        };
+
+        /**
+         * Create initial 3D mesh
+         */
+        const createMesh3D = (degreeU, degreeV, degreeW, numElementsU, numElementsV, numElementsW) => {
+            resetBSplineIdCounter();
+            
+            const knotsU = [], knotsV = [], knotsW = [];
+            for (let i = 0; i <= numElementsU; i++) knotsU.push(i / numElementsU);
+            for (let i = 0; i <= numElementsV; i++) knotsV.push(i / numElementsV);
+            for (let i = 0; i <= numElementsW; i++) knotsW.push(i / numElementsW);
+            
+            const meshfaces = [];
+            let nextId = 0;
+            
+            // Create meshfaces perpendicular to each axis
+            for (const u of knotsU) meshfaces.push(new Meshface('u', u, 0, 1, 0, 1, nextId++));
+            for (const v of knotsV) meshfaces.push(new Meshface('v', v, 0, 1, 0, 1, nextId++));
+            for (const w of knotsW) meshfaces.push(new Meshface('w', w, 0, 1, 0, 1, nextId++));
+            
+            // Create B-splines
+            const bsplines = [];
+            const numBSplinesU = knotsU.length - degreeU - 1;
+            const numBSplinesV = knotsV.length - degreeV - 1;
+            const numBSplinesW = knotsW.length - degreeW - 1;
+            
+            for (let i = 0; i < numBSplinesU; i++) {
+                for (let j = 0; j < numBSplinesV; j++) {
+                    for (let k = 0; k < numBSplinesW; k++) {
+                        bsplines.push(new LRBSpline3D(
+                            knotsU.slice(i, i + degreeU + 2),
+                            knotsV.slice(j, j + degreeV + 2),
+                            knotsW.slice(k, k + degreeW + 2)
+                        ));
+                    }
+                }
+            }
+            
+            // Create elements
+            const elements = [];
+            for (let i = 0; i < numElementsU; i++) {
+                for (let j = 0; j < numElementsV; j++) {
+                    for (let k = 0; k < numElementsW; k++) {
+                        elements.push(new Element3D(
+                            knotsU[i], knotsU[i + 1],
+                            knotsV[j], knotsV[j + 1],
+                            knotsW[k], knotsW[k + 1]
+                        ));
+                    }
+                }
+            }
+            
+            return {
+                meshfaces, bsplines, elements,
+                degreeU, degreeV, degreeW,
+                nextId,
+                globalKnotsU: new Set(knotsU),
+                globalKnotsV: new Set(knotsV),
+                globalKnotsW: new Set(knotsW)
+            };
+        };
+
+        /**
+         * Add a meshface and perform refinement
+         */
+        const addMeshface = (mesh, normalAxis, constant, span1Start, span1End, span2Start, span2End) => {
+            const epsilon = 1e-10;
+            const newMesh = { ...mesh };
+            
+            // Create new meshface
+            const newFace = new Meshface(normalAxis, constant, span1Start, span1End, span2Start, span2End, newMesh.nextId++);
+            newMesh.meshfaces = [...mesh.meshfaces, newFace];
+            
+            // Update global knots
+            if (normalAxis === 'u') newMesh.globalKnotsU = new Set([...mesh.globalKnotsU, constant]);
+            else if (normalAxis === 'v') newMesh.globalKnotsV = new Set([...mesh.globalKnotsV, constant]);
+            else newMesh.globalKnotsW = new Set([...mesh.globalKnotsW, constant]);
+            
+            // Split B-splines
+            let currentBSplines = [...mesh.bsplines];
+            let newlyCreated = [];
+            
+            for (const bspline of currentBSplines) {
+                if (meshfaceSplitsBSpline(newFace, bspline)) {
+                    newlyCreated.push(...splitBSplineByMeshface(bspline, newFace));
+                }
+            }
+            
+            const unsplit = currentBSplines.filter(b => !meshfaceSplitsBSpline(newFace, b));
+            
+            // Check new B-splines against existing meshfaces
+            let splitsOccurred = true;
+            while (splitsOccurred) {
+                splitsOccurred = false;
+                const nextNew = [];
+                for (const bspline of newlyCreated) {
+                    let wasSplit = false;
+                    for (const face of newMesh.meshfaces) {
+                        if (meshfaceSplitsBSpline(face, bspline)) {
+                            nextNew.push(...splitBSplineByMeshface(bspline, face));
+                            wasSplit = true;
+                            splitsOccurred = true;
+                            break;
+                        }
+                    }
+                    if (!wasSplit) nextNew.push(bspline);
+                }
+                newlyCreated = nextNew;
+            }
+            
+            newMesh.bsplines = removeDuplicateBSplines3D([...unsplit, ...newlyCreated]);
+            
+            // Split elements
+            const newElements = [];
+            for (const element of mesh.elements) {
+                newElements.push(...element.splitByMeshface(newFace));
+            }
+            newMesh.elements = newElements;
+            
+            return newMesh;
+        };
+
+        /**
+         * Three.js Visualization Component
+         */
+        function ThreeVisualization({ 
+            mesh, 
+            selectedBSpline, 
+            showMeshfaces, 
+            showGreville, 
+            showElements, 
+            showBSplineSupports,
+            refinementPoints,
+            refinementStart,
+            onPointClick,
+            onGrevilleClick,
+            showRefinementPoints
+        }) {
+            const containerRef = useRef(null);
+            const sceneRef = useRef(null);
+            const rendererRef = useRef(null);
+            const cameraRef = useRef(null);
+            const controlsRef = useRef(null);
+            const clickablePointsRef = useRef([]);
+            const grevillePointsRef = useRef([]);
+
+            useEffect(() => {
+                if (!containerRef.current) return;
+
+                // Setup scene
+                const scene = new THREE.Scene();
+                scene.background = new THREE.Color(0xf0f0f0);
+                sceneRef.current = scene;
+
+                // Setup camera
+                const width = containerRef.current.clientWidth;
+                const height = containerRef.current.clientHeight;
+                const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
+                camera.position.set(2, 2, 2);
+                cameraRef.current = camera;
+
+                // Setup renderer
+                const renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setSize(width, height);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                containerRef.current.appendChild(renderer.domElement);
+                rendererRef.current = renderer;
+
+                // Setup controls
+                const controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.05;
+                controls.target.set(0.5, 0.5, 0.5);
+                controls.update();
+                controlsRef.current = controls;
+
+                // Add lights
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+                scene.add(ambientLight);
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(5, 5, 5);
+                scene.add(directionalLight);
+
+                // Axes helper removed - bounding box is sufficient
+
+                // Animation loop
+                const animate = () => {
+                    requestAnimationFrame(animate);
+                    controls.update();
+                    renderer.render(scene, camera);
+                };
+                animate();
+
+                // Handle resize
+                const handleResize = () => {
+                    if (!containerRef.current) return;
+                    const w = containerRef.current.clientWidth;
+                    const h = containerRef.current.clientHeight;
+                    camera.aspect = w / h;
+                    camera.updateProjectionMatrix();
+                    renderer.setSize(w, h);
+                };
+                window.addEventListener('resize', handleResize);
+
+                return () => {
+                    window.removeEventListener('resize', handleResize);
+                    renderer.dispose();
+                    if (containerRef.current && renderer.domElement) {
+                        containerRef.current.removeChild(renderer.domElement);
+                    }
+                };
+            }, []);
+
+            // Handle click events for refinement points and Greville points
+            useEffect(() => {
+                if (!rendererRef.current || !cameraRef.current || !sceneRef.current) return;
+                
+                const raycaster = new THREE.Raycaster();
+                const mouse = new THREE.Vector2();
+                
+                const handleClick = (event) => {
+                    const rect = rendererRef.current.domElement.getBoundingClientRect();
+                    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+                    
+                    raycaster.setFromCamera(mouse, cameraRef.current);
+                    
+                    // First check refinement points
+                    if (showRefinementPoints && clickablePointsRef.current.length > 0) {
+                        const intersects = raycaster.intersectObjects(clickablePointsRef.current);
+                        if (intersects.length > 0) {
+                            const clickedPoint = intersects[0].object.userData.pointData;
+                            if (clickedPoint && onPointClick) {
+                                onPointClick(clickedPoint);
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // Then check Greville points
+                    if (showGreville && grevillePointsRef.current.length > 0) {
+                        const intersects = raycaster.intersectObjects(grevillePointsRef.current);
+                        if (intersects.length > 0) {
+                            const bsplineId = intersects[0].object.userData.bsplineId;
+                            if (bsplineId !== undefined && onGrevilleClick) {
+                                onGrevilleClick(bsplineId);
+                                return;
+                            }
+                        }
+                    }
+                };
+                
+                const handleMouseMove = (event) => {
+                    const rect = rendererRef.current.domElement.getBoundingClientRect();
+                    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+                    
+                    raycaster.setFromCamera(mouse, cameraRef.current);
+                    
+                    // Check refinement points first
+                    if (showRefinementPoints && clickablePointsRef.current.length > 0) {
+                        const intersects = raycaster.intersectObjects(clickablePointsRef.current);
+                        if (intersects.length > 0) {
+                            rendererRef.current.domElement.style.cursor = 'pointer';
+                            return;
+                        }
+                    }
+                    
+                    // Then check Greville points
+                    if (showGreville && grevillePointsRef.current.length > 0) {
+                        const intersects = raycaster.intersectObjects(grevillePointsRef.current);
+                        if (intersects.length > 0) {
+                            rendererRef.current.domElement.style.cursor = 'pointer';
+                            return;
+                        }
+                    }
+                    
+                    rendererRef.current.domElement.style.cursor = 'grab';
+                };
+                
+                rendererRef.current.domElement.addEventListener('click', handleClick);
+                rendererRef.current.domElement.addEventListener('mousemove', handleMouseMove);
+                
+                return () => {
+                    if (rendererRef.current) {
+                        rendererRef.current.domElement.removeEventListener('click', handleClick);
+                        rendererRef.current.domElement.removeEventListener('mousemove', handleMouseMove);
+                    }
+                };
+            }, [showRefinementPoints, showGreville, onPointClick, onGrevilleClick]);
+
+            // Update visualization when mesh changes
+            useEffect(() => {
+                if (!sceneRef.current) return;
+                const scene = sceneRef.current;
+
+                // Remove old mesh objects
+                const toRemove = [];
+                scene.traverse(obj => {
+                    if (obj.userData.isMeshObject) toRemove.push(obj);
+                });
+                toRemove.forEach(obj => scene.remove(obj));
+                clickablePointsRef.current = [];
+                grevillePointsRef.current = [];
+
+                // Draw bounding box
+                const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+                const boxEdges = new THREE.EdgesGeometry(boxGeo);
+                const boxLines = new THREE.LineSegments(boxEdges, new THREE.LineBasicMaterial({ color: 0x333333 }));
+                boxLines.position.set(0.5, 0.5, 0.5);
+                boxLines.userData.isMeshObject = true;
+                scene.add(boxLines);
+
+                // Draw meshfaces
+                if (showMeshfaces) {
+                    mesh.meshfaces.forEach(face => {
+                        const spans = face.getSpans();
+                        let geometry, position;
+                        
+                        if (face.normalAxis === 'u') {
+                            const width = spans.end1 - spans.start1;
+                            const height = spans.end2 - spans.start2;
+                            geometry = new THREE.PlaneGeometry(width, height);
+                            position = new THREE.Vector3(face.constant, (spans.start1 + spans.end1) / 2, (spans.start2 + spans.end2) / 2);
+                            geometry.rotateY(Math.PI / 2);
+                        } else if (face.normalAxis === 'v') {
+                            const width = spans.end1 - spans.start1;
+                            const height = spans.end2 - spans.start2;
+                            geometry = new THREE.PlaneGeometry(width, height);
+                            position = new THREE.Vector3((spans.start1 + spans.end1) / 2, face.constant, (spans.start2 + spans.end2) / 2);
+                            geometry.rotateX(-Math.PI / 2);
+                        } else {
+                            const width = spans.end1 - spans.start1;
+                            const height = spans.end2 - spans.start2;
+                            geometry = new THREE.PlaneGeometry(width, height);
+                            position = new THREE.Vector3((spans.start1 + spans.end1) / 2, (spans.start2 + spans.end2) / 2, face.constant);
+                        }
+                        
+                        const material = new THREE.MeshBasicMaterial({ 
+                            color: 0x007acc, 
+                            transparent: true, 
+                            opacity: 0.1, 
+                            side: THREE.DoubleSide 
+                        });
+                        const plane = new THREE.Mesh(geometry, material);
+                        plane.position.copy(position);
+                        plane.userData.isMeshObject = true;
+                        scene.add(plane);
+
+                        // Add edges
+                        const edges = new THREE.EdgesGeometry(geometry);
+                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x007acc }));
+                        line.position.copy(position);
+                        line.userData.isMeshObject = true;
+                        scene.add(line);
+                    });
+                }
+
+                // Draw elements
+                if (showElements) {
+                    mesh.elements.forEach(el => {
+                        const sizeU = el.uMax - el.uMin;
+                        const sizeV = el.vMax - el.vMin;
+                        const sizeW = el.wMax - el.wMin;
+                        const geo = new THREE.BoxGeometry(sizeU, sizeV, sizeW);
+                        const edges = new THREE.EdgesGeometry(geo);
+                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x999999 }));
+                        line.position.set(
+                            (el.uMin + el.uMax) / 2,
+                            (el.vMin + el.vMax) / 2,
+                            (el.wMin + el.wMax) / 2
+                        );
+                        line.userData.isMeshObject = true;
+                        scene.add(line);
+                    });
+                }
+
+                // Draw B-spline supports (only selected, or all if showBSplineSupports is on)
+                mesh.bsplines.forEach(bspline => {
+                    const support = bspline.getSupport();
+                    const isSelected = selectedBSpline === bspline.id;
+                    
+                    // Only draw if selected, or if showBSplineSupports is on
+                    if (!isSelected && !showBSplineSupports) return;
+                    
+                    const sizeU = support.uMax - support.uMin;
+                    const sizeV = support.vMax - support.vMin;
+                    const sizeW = support.wMax - support.wMin;
+                    
+                    if (isSelected) {
+                        const geo = new THREE.BoxGeometry(sizeU * 0.98, sizeV * 0.98, sizeW * 0.98);
+                        const mat = new THREE.MeshBasicMaterial({ 
+                            color: 0xff6600, 
+                            transparent: true, 
+                            opacity: 0.3
+                        });
+                        const box = new THREE.Mesh(geo, mat);
+                        box.position.set(
+                            (support.uMin + support.uMax) / 2,
+                            (support.vMin + support.vMax) / 2,
+                            (support.wMin + support.wMax) / 2
+                        );
+                        box.userData.isMeshObject = true;
+                        scene.add(box);
+
+                        const edges = new THREE.EdgesGeometry(geo);
+                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xff6600, linewidth: 2 }));
+                        line.position.copy(box.position);
+                        line.userData.isMeshObject = true;
+                        scene.add(line);
+                    } else if (showBSplineSupports) {
+                        // Unselected supports - very faint outline only
+                        const geo = new THREE.BoxGeometry(sizeU * 0.98, sizeV * 0.98, sizeW * 0.98);
+                        const edges = new THREE.EdgesGeometry(geo);
+                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ 
+                            color: 0x999999, 
+                            transparent: true,
+                            opacity: 0.2
+                        }));
+                        line.position.set(
+                            (support.uMin + support.uMax) / 2,
+                            (support.vMin + support.vMax) / 2,
+                            (support.wMin + support.wMax) / 2
+                        );
+                        line.userData.isMeshObject = true;
+                        scene.add(line);
+                    }
+                });
+
+                // Draw Greville points (clickable to select B-spline)
+                if (showGreville) {
+                    const sphereGeo = new THREE.SphereGeometry(0.015, 16, 16);
+                    mesh.bsplines.forEach(bspline => {
+                        const greville = bspline.getGrevillePoint();
+                        const isSelected = selectedBSpline === bspline.id;
+                        const mat = new THREE.MeshBasicMaterial({ color: isSelected ? 0xff0000 : 0x28a745 });
+                        const sphere = new THREE.Mesh(sphereGeo, mat);
+                        sphere.position.set(greville.u, greville.v, greville.w);
+                        sphere.userData.isMeshObject = true;
+                        sphere.userData.isGrevillePoint = true;
+                        sphere.userData.bsplineId = bspline.id;
+                        scene.add(sphere);
+                        grevillePointsRef.current.push(sphere);
+                    });
+                }
+
+                // Draw refinement points
+                if (showRefinementPoints && refinementPoints && refinementPoints.length > 0) {
+                    const pointSphereGeo = new THREE.SphereGeometry(0.012, 12, 12);
+                    refinementPoints.forEach((point, idx) => {
+                        const isStartPoint = refinementStart && 
+                            Math.abs(point.u - refinementStart.u) < 1e-10 &&
+                            Math.abs(point.v - refinementStart.v) < 1e-10 &&
+                            Math.abs(point.w - refinementStart.w) < 1e-10;
+                        
+                        const mat = new THREE.MeshBasicMaterial({ 
+                            color: isStartPoint ? 0xdc3545 : 0x007acc,
+                            transparent: true,
+                            opacity: isStartPoint ? 1.0 : 0.6
+                        });
+                        const sphere = new THREE.Mesh(pointSphereGeo, mat);
+                        sphere.position.set(point.u, point.v, point.w);
+                        sphere.userData.isMeshObject = true;
+                        sphere.userData.pointData = point;
+                        sphere.userData.isClickable = true;
+                        scene.add(sphere);
+                        clickablePointsRef.current.push(sphere);
+                    });
+                    
+                    // Also draw the start point if set
+                    if (refinementStart) {
+                        const startMat = new THREE.MeshBasicMaterial({ color: 0xdc3545 });
+                        const startSphere = new THREE.Mesh(pointSphereGeo, startMat);
+                        startSphere.position.set(refinementStart.u, refinementStart.v, refinementStart.w);
+                        startSphere.userData.isMeshObject = true;
+                        scene.add(startSphere);
+                    }
+                }
+
+                // Draw preview plane when start point is selected
+                if (refinementStart) {
+                    const { u, v, w, normalAxis } = refinementStart;
+                    let geometry, position;
+                    
+                    if (normalAxis === 'u') {
+                        geometry = new THREE.PlaneGeometry(1, 1);
+                        geometry.rotateY(Math.PI / 2);
+                        position = new THREE.Vector3(u, 0.5, 0.5);
+                    } else if (normalAxis === 'v') {
+                        geometry = new THREE.PlaneGeometry(1, 1);
+                        geometry.rotateX(-Math.PI / 2);
+                        position = new THREE.Vector3(0.5, v, 0.5);
+                    } else {
+                        geometry = new THREE.PlaneGeometry(1, 1);
+                        position = new THREE.Vector3(0.5, 0.5, w);
+                    }
+                    
+                    const material = new THREE.MeshBasicMaterial({
+                        color: 0x007acc,
+                        transparent: true,
+                        opacity: 0.15,
+                        side: THREE.DoubleSide
+                    });
+                    const plane = new THREE.Mesh(geometry, material);
+                    plane.position.copy(position);
+                    plane.userData.isMeshObject = true;
+                    scene.add(plane);
+                    
+                    // Add dashed outline
+                    const edges = new THREE.EdgesGeometry(geometry);
+                    const lineMat = new THREE.LineDashedMaterial({ 
+                        color: 0x007acc, 
+                        dashSize: 0.05, 
+                        gapSize: 0.02 
+                    });
+                    const line = new THREE.LineSegments(edges, lineMat);
+                    line.computeLineDistances();
+                    line.position.copy(position);
+                    line.userData.isMeshObject = true;
+                    scene.add(line);
+                }
+
+            }, [mesh, selectedBSpline, showMeshfaces, showGreville, showElements, showBSplineSupports, refinementPoints, refinementStart, showRefinementPoints]);
+
+            return <div ref={containerRef} id="threejs-canvas" />;
+        }
+
+        /**
+         * Main App Component
+         */
+        function App() {
+            const [degreeU, setDegreeU] = useState(2);
+            const [degreeV, setDegreeV] = useState(2);
+            const [degreeW, setDegreeW] = useState(2);
+            const [numElementsU, setNumElementsU] = useState(3);
+            const [numElementsV, setNumElementsV] = useState(3);
+            const [numElementsW, setNumElementsW] = useState(3);
+            const [mesh, setMesh] = useState(() => createMesh3D(2, 2, 2, 3, 3, 3));
+            const [selectedBSpline, setSelectedBSpline] = useState(null);
+            
+            // Visualization toggles
+            const [showMeshfaces, setShowMeshfaces] = useState(true);
+            const [showGreville, setShowGreville] = useState(true);
+            const [showElements, setShowElements] = useState(false);
+            const [showBSplineSupports, setShowBSplineSupports] = useState(false);
+            const [showUnselectedSupports, setShowUnselectedSupports] = useState(false);
+            const [showRefinementPoints, setShowRefinementPoints] = useState(true);
+            
+            // Refinement state
+            const [refAxis, setRefAxis] = useState('u');
+            const [refinementStart, setRefinementStart] = useState(null);
+
+            // Compute valid points based on current state
+            const validStartPoints = useMemo(() => getValidStartPoints3D(mesh, refAxis), [mesh, refAxis]);
+            const validEndPoints = useMemo(() => (
+                refinementStart ? getValidEndPoints3D(mesh, refinementStart) : []
+            ), [mesh, refinementStart]);
+            
+            // Current points to display
+            const refinementPoints = refinementStart ? validEndPoints : validStartPoints;
+
+            const handleReset = () => {
+                setMesh(createMesh3D(degreeU, degreeV, degreeW, numElementsU, numElementsV, numElementsW));
+                setSelectedBSpline(null);
+                setRefinementStart(null);
+            };
+
+            const handleAxisChange = (axis) => {
+                setRefAxis(axis);
+                setRefinementStart(null);
+            };
+
+            const handlePointClick = (point) => {
+                if (!refinementStart) {
+                    // Set start point
+                    setRefinementStart(point);
+                    return;
+                }
+                
+                // We have start and now end - add the meshface
+                const { normalAxis } = refinementStart;
+                let span1Start, span1End, span2Start, span2End;
+                let constant;
+                
+                if (normalAxis === 'u') {
+                    constant = refinementStart.u;
+                    span1Start = Math.min(refinementStart.v, point.v);
+                    span1End = Math.max(refinementStart.v, point.v);
+                    span2Start = Math.min(refinementStart.w, point.w);
+                    span2End = Math.max(refinementStart.w, point.w);
+                } else if (normalAxis === 'v') {
+                    constant = refinementStart.v;
+                    span1Start = Math.min(refinementStart.u, point.u);
+                    span1End = Math.max(refinementStart.u, point.u);
+                    span2Start = Math.min(refinementStart.w, point.w);
+                    span2End = Math.max(refinementStart.w, point.w);
+                } else {
+                    constant = refinementStart.w;
+                    span1Start = Math.min(refinementStart.u, point.u);
+                    span1End = Math.max(refinementStart.u, point.u);
+                    span2Start = Math.min(refinementStart.v, point.v);
+                    span2End = Math.max(refinementStart.v, point.v);
+                }
+                
+                const newMesh = addMeshface(mesh, normalAxis, constant, span1Start, span1End, span2Start, span2End);
+                setMesh(newMesh);
+                setRefinementStart(null);
+                setSelectedBSpline(null);
+            };
+
+            const handleCancelRefinement = () => {
+                setRefinementStart(null);
+            };
+
+            const minElements = (deg) => deg + 1;
+
+            return (
+                <div className="container">
+                    <div className="controls">
+                        <h2>LR B-Spline 3D</h2>
+                        
+                        <div className="info">
+                            {refinementStart 
+                                ? `Click an end point (blue sphere) to complete the ${refAxis.toUpperCase()}-perpendicular meshface`
+                                : `Select refinement axis, then click a start point (blue sphere) in the 3D view`
+                            }
+                        </div>
+
+                        <div className="stats">
+                            <strong>Statistics:</strong><br />
+                            B-splines: {mesh.bsplines.length}<br />
+                            Meshfaces: {mesh.meshfaces.length}<br />
+                            Elements: {mesh.elements.length}
+                        </div>
+
+                        <div className="control-group">
+                            <label>Degree U: {degreeU}</label>
+                            <input type="range" min="1" max="3" value={degreeU} 
+                                onChange={(e) => setDegreeU(parseInt(e.target.value))} />
+                            <label>Degree V: {degreeV}</label>
+                            <input type="range" min="1" max="3" value={degreeV} 
+                                onChange={(e) => setDegreeV(parseInt(e.target.value))} />
+                            <label>Degree W: {degreeW}</label>
+                            <input type="range" min="1" max="3" value={degreeW} 
+                                onChange={(e) => setDegreeW(parseInt(e.target.value))} />
+                        </div>
+
+                        <div className="control-group">
+                            <label>Elements U: {numElementsU}</label>
+                            <input type="range" min={minElements(degreeU)} max="6" value={numElementsU} 
+                                onChange={(e) => setNumElementsU(parseInt(e.target.value))} />
+                            <label>Elements V: {numElementsV}</label>
+                            <input type="range" min={minElements(degreeV)} max="6" value={numElementsV} 
+                                onChange={(e) => setNumElementsV(parseInt(e.target.value))} />
+                            <label>Elements W: {numElementsW}</label>
+                            <input type="range" min={minElements(degreeW)} max="6" value={numElementsW} 
+                                onChange={(e) => setNumElementsW(parseInt(e.target.value))} />
+                        </div>
+
+                        <button onClick={handleReset}>Reset Mesh</button>
+
+                        <div className="control-group">
+                            <label>Refinement Direction (normal axis):</label>
+                            <div style={{ display: 'flex', gap: '5px', marginBottom: '8px' }}>
+                                {['u', 'v', 'w'].map(axis => (
+                                    <button key={axis} 
+                                        style={{ 
+                                            flex: 1, 
+                                            background: refAxis === axis ? '#005a9e' : '#007acc' 
+                                        }}
+                                        onClick={() => handleAxisChange(axis)}>
+                                        {axis.toUpperCase()}-perp
+                                    </button>
+                                ))}
+                            </div>
+                            {refinementStart && (
+                                <div style={{ marginBottom: '8px' }}>
+                                    <div style={{ fontSize: '12px', marginBottom: '5px' }}>
+                                        Start: ({refinementStart.u.toFixed(2)}, {refinementStart.v.toFixed(2)}, {refinementStart.w.toFixed(2)})
+                                    </div>
+                                    <button onClick={handleCancelRefinement} style={{ background: '#dc3545' }}>
+                                        Cancel Refinement
+                                    </button>
+                                </div>
+                            )}
+                            <div style={{ fontSize: '11px', color: '#666' }}>
+                                Available points: {refinementPoints.length}
+                            </div>
+                        </div>
+
+                        <div className="control-group">
+                            <label>Display Options:</label>
+                            <div className="checkbox-group">
+                                <input type="checkbox" id="showRefinementPoints" checked={showRefinementPoints} 
+                                    onChange={(e) => setShowRefinementPoints(e.target.checked)} />
+                                <label htmlFor="showRefinementPoints">Refinement Points</label>
+                            </div>
+                            <div className="checkbox-group">
+                                <input type="checkbox" id="showMeshfaces" checked={showMeshfaces} 
+                                    onChange={(e) => setShowMeshfaces(e.target.checked)} />
+                                <label htmlFor="showMeshfaces">Meshfaces</label>
+                            </div>
+                            <div className="checkbox-group">
+                                <input type="checkbox" id="showGreville" checked={showGreville} 
+                                    onChange={(e) => setShowGreville(e.target.checked)} />
+                                <label htmlFor="showGreville">Greville Points</label>
+                            </div>
+                            <div className="checkbox-group">
+                                <input type="checkbox" id="showElements" checked={showElements} 
+                                    onChange={(e) => setShowElements(e.target.checked)} />
+                                <label htmlFor="showElements">Elements</label>
+                            </div>
+                            <div className="checkbox-group">
+                                <input type="checkbox" id="showSupports" checked={showBSplineSupports} 
+                                    onChange={(e) => setShowBSplineSupports(e.target.checked)} />
+                                <label htmlFor="showSupports">B-spline Supports</label>
+                            </div>
+                        </div>
+
+                        <div className="control-group">
+                            <label>B-splines (click to select):</label>
+                            <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                                {mesh.bsplines.map(bspline => (
+                                    <div key={bspline.id}
+                                        className={`bspline-item ${selectedBSpline === bspline.id ? 'selected' : ''}`}
+                                        onClick={() => setSelectedBSpline(selectedBSpline === bspline.id ? null : bspline.id)}>
+                                        u:[{bspline.knotsU.map(k => k.toFixed(2)).join(',')}]<br/>
+                                        v:[{bspline.knotsV.map(k => k.toFixed(2)).join(',')}]<br/>
+                                        w:[{bspline.knotsW.map(k => k.toFixed(2)).join(',')}]
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="visualization">
+                        <ThreeVisualization 
+                            mesh={mesh}
+                            selectedBSpline={selectedBSpline}
+                            showMeshfaces={showMeshfaces}
+                            showGreville={showGreville}
+                            showElements={showElements}
+                            showBSplineSupports={showBSplineSupports}
+                            refinementPoints={refinementPoints}
+                            refinementStart={refinementStart}
+                            onPointClick={handlePointClick}
+                            onGrevilleClick={(id) => setSelectedBSpline(selectedBSpline === id ? null : id)}
+                            showRefinementPoints={showRefinementPoints}
+                        />
+                    </div>
+                </div>
+            );
+        }
+
+        // Wait for THREE to be loaded before rendering
+        const renderApp = () => {
+            ReactDOM.render(<App />, document.getElementById('root'));
+        };
+        
+        if (window.THREE) {
+            renderApp();
+        } else {
+            window.addEventListener('three-loaded', renderApp);
+        }
+    </script>
+</body>
+</html>
