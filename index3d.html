@@ -1500,7 +1500,7 @@
                     const sizeW = support.wMax - support.wMin;
                     
                     if (isSelected) {
-                        const geo = new THREE.BoxGeometry(sizeU * 0.98, sizeV * 0.98, sizeW * 0.98);
+                        const geo = new THREE.BoxGeometry(sizeU * 0.998, sizeV * 0.998, sizeW * 0.998);
                         const mat = new THREE.MeshBasicMaterial({ 
                             color: 0xff6600, 
                             transparent: true, 
@@ -1522,7 +1522,7 @@
                         scene.add(line);
                     } else if (showBSplineSupports) {
                         // Unselected supports - very faint outline only
-                        const geo = new THREE.BoxGeometry(sizeU * 0.98, sizeV * 0.98, sizeW * 0.98);
+                        const geo = new THREE.BoxGeometry(sizeU * 0.998, sizeV * 0.998, sizeW * 0.998);
                         const edges = new THREE.EdgesGeometry(geo);
                         const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ 
                             color: 0x999999, 
@@ -1651,12 +1651,11 @@
             const [selectedBSpline, setSelectedBSpline] = useState(null);
             
             // Visualization toggles
-            const [showMeshfaces, setShowMeshfaces] = useState(true);
+            const [showMeshfaces, setShowMeshfaces] = useState(false);
             const [showGreville, setShowGreville] = useState(true);
-            const [showElements, setShowElements] = useState(false);
+            const [showElements, setShowElements] = useState(true);
             const [showBSplineSupports, setShowBSplineSupports] = useState(false);
-            const [showUnselectedSupports, setShowUnselectedSupports] = useState(false);
-            const [showRefinementPoints, setShowRefinementPoints] = useState(true);
+            const [showRefinementControls, setShowRefinementControls] = useState(false);
             
             // Refinement state
             const [refAxis, setRefAxis] = useState('u');
@@ -1732,10 +1731,7 @@
                         <h2>LR B-Spline 3D</h2>
                         
                         <div className="info">
-                            {refinementStart 
-                                ? `Click an end point (blue sphere) to complete the ${refAxis.toUpperCase()}-perpendicular meshface`
-                                : `Select refinement axis, then click a start point (blue sphere) in the 3D view`
-                            }
+                            Click on Greville points (green) to select B-splines. Use mouse to rotate/zoom.
                         </div>
 
                         <div className="stats">
@@ -1772,41 +1768,65 @@
                         <button onClick={handleReset}>Reset Mesh</button>
 
                         <div className="control-group">
-                            <label>Refinement Direction (normal axis):</label>
-                            <div style={{ display: 'flex', gap: '5px', marginBottom: '8px' }}>
-                                {['u', 'v', 'w'].map(axis => (
-                                    <button key={axis} 
-                                        style={{ 
-                                            flex: 1, 
-                                            background: refAxis === axis ? '#005a9e' : '#007acc' 
-                                        }}
-                                        onClick={() => handleAxisChange(axis)}>
-                                        {axis.toUpperCase()}-perp
-                                    </button>
-                                ))}
-                            </div>
-                            {refinementStart && (
-                                <div style={{ marginBottom: '8px' }}>
-                                    <div style={{ fontSize: '12px', marginBottom: '5px' }}>
-                                        Start: ({refinementStart.u.toFixed(2)}, {refinementStart.v.toFixed(2)}, {refinementStart.w.toFixed(2)})
+                            <button 
+                                onClick={() => setShowRefinementControls(!showRefinementControls)}
+                                style={{ 
+                                    background: showRefinementControls ? '#28a745' : '#6c757d',
+                                    marginBottom: showRefinementControls ? '10px' : '0'
+                                }}>
+                                {showRefinementControls ? '▼ Refinement Mode (Active)' : '▶ Refinement Mode'}
+                            </button>
+                            
+                            {showRefinementControls && (
+                                <div style={{ 
+                                    background: '#f8f9fa', 
+                                    padding: '10px', 
+                                    borderRadius: '4px',
+                                    border: '1px solid #28a745'
+                                }}>
+                                    <div style={{ fontSize: '12px', color: '#28a745', marginBottom: '8px' }}>
+                                        {refinementStart 
+                                            ? `Click end point to complete ${refAxis.toUpperCase()}-perp meshface`
+                                            : `Click a blue point to start refinement`
+                                        }
                                     </div>
-                                    <button onClick={handleCancelRefinement} style={{ background: '#dc3545' }}>
-                                        Cancel Refinement
-                                    </button>
+                                    
+                                    <label style={{ fontSize: '12px' }}>Direction (normal axis):</label>
+                                    <div style={{ display: 'flex', gap: '5px', marginBottom: '8px' }}>
+                                        {['u', 'v', 'w'].map(axis => (
+                                            <button key={axis} 
+                                                style={{ 
+                                                    flex: 1, 
+                                                    background: refAxis === axis ? '#005a9e' : '#007acc',
+                                                    fontSize: '12px',
+                                                    padding: '5px'
+                                                }}
+                                                onClick={() => handleAxisChange(axis)}>
+                                                {axis.toUpperCase()}-perp
+                                            </button>
+                                        ))}
+                                    </div>
+                                    
+                                    {refinementStart && (
+                                        <div style={{ marginBottom: '8px' }}>
+                                            <div style={{ fontSize: '11px', marginBottom: '5px' }}>
+                                                Start: ({refinementStart.u.toFixed(2)}, {refinementStart.v.toFixed(2)}, {refinementStart.w.toFixed(2)})
+                                            </div>
+                                            <button onClick={handleCancelRefinement} style={{ background: '#dc3545', fontSize: '12px' }}>
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    )}
+                                    
+                                    <div style={{ fontSize: '10px', color: '#666' }}>
+                                        Available points: {refinementPoints.length}
+                                    </div>
                                 </div>
                             )}
-                            <div style={{ fontSize: '11px', color: '#666' }}>
-                                Available points: {refinementPoints.length}
-                            </div>
                         </div>
 
                         <div className="control-group">
                             <label>Display Options:</label>
-                            <div className="checkbox-group">
-                                <input type="checkbox" id="showRefinementPoints" checked={showRefinementPoints} 
-                                    onChange={(e) => setShowRefinementPoints(e.target.checked)} />
-                                <label htmlFor="showRefinementPoints">Refinement Points</label>
-                            </div>
                             <div className="checkbox-group">
                                 <input type="checkbox" id="showMeshfaces" checked={showMeshfaces} 
                                     onChange={(e) => setShowMeshfaces(e.target.checked)} />
@@ -1856,8 +1876,15 @@
                             refinementPoints={refinementPoints}
                             refinementStart={refinementStart}
                             onPointClick={handlePointClick}
-                            onGrevilleClick={(id) => setSelectedBSpline(selectedBSpline === id ? null : id)}
-                            showRefinementPoints={showRefinementPoints}
+                            onGrevilleClick={(id) => {
+                                if (selectedBSpline === id) {
+                                    setSelectedBSpline(null);
+                                } else {
+                                    setSelectedBSpline(id);
+                                    setShowBSplineSupports(true);
+                                }
+                            }}
+                            showRefinementPoints={showRefinementControls}
                         />
                     </div>
                 </div>
