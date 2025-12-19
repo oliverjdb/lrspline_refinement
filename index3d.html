@@ -1926,7 +1926,8 @@
             onGrevilleClick,
             showRefinementPoints,
             inspectionPlane,
-            onInspectionClick
+            onInspectionClick,
+            showInspectionPoints
         }) {
             const containerRef = useRef(null);
             const sceneRef = useRef(null);
@@ -2297,7 +2298,7 @@
                     const plane = new THREE.Mesh(geometry, material);
                     plane.position.copy(position);
                     plane.userData.isMeshObject = true;
-                    plane.renderOrder = 999;
+                    plane.renderOrder = 1500;  // Higher than B-spline surfaces
                     scene.add(plane);
                     
                     // Add dashed outline
@@ -2311,7 +2312,7 @@
                     line.computeLineDistances();
                     line.position.copy(position);
                     line.userData.isMeshObject = true;
-                    line.renderOrder = 999;
+                    line.renderOrder = 1500;  // Higher than B-spline surfaces
                     scene.add(line);
                     
                     // Add grid lines showing element intersections with the plane
@@ -2383,7 +2384,7 @@
                     const gridGeometry = new THREE.BufferGeometry().setFromPoints(gridPoints);
                     const gridLines = new THREE.LineSegments(gridGeometry, gridLineMat);
                     gridLines.userData.isMeshObject = true;
-                    gridLines.renderOrder = 1000;  // Higher than plane, same as refinement points
+                    gridLines.renderOrder = 1501;  // Higher than refinement plane
                     scene.add(gridLines);
                 }
 
@@ -2430,19 +2431,20 @@
                 }
 
                 // Draw inspection points outside the cube (one for each unique constant per axis)
-                const inspectionOffset = -0.04;
-                const inspSphereGeo = new THREE.SphereGeometry(0.009, 12, 12);
-                
-                // Get unique constants for each axis
-                const uniqueU = new Set(), uniqueV = new Set(), uniqueW = new Set();
-                for (const face of mesh.meshfaces) {
-                    if (face.normalAxis === 'u') uniqueU.add(face.constant);
-                    else if (face.normalAxis === 'v') uniqueV.add(face.constant);
-                    else uniqueW.add(face.constant);
-                }
-                
-                // Draw U-normal plane inspection points at (u, offset, offset)
-                for (const u of uniqueU) {
+                if (showInspectionPoints) {
+                    const inspectionOffset = -0.04;
+                    const inspSphereGeo = new THREE.SphereGeometry(0.009, 12, 12);
+                    
+                    // Get unique constants for each axis
+                    const uniqueU = new Set(), uniqueV = new Set(), uniqueW = new Set();
+                    for (const face of mesh.meshfaces) {
+                        if (face.normalAxis === 'u') uniqueU.add(face.constant);
+                        else if (face.normalAxis === 'v') uniqueV.add(face.constant);
+                        else uniqueW.add(face.constant);
+                    }
+                    
+                    // Draw U-normal plane inspection points at (u, offset, offset)
+                    for (const u of uniqueU) {
                     const isSelected = inspectionPlane && inspectionPlane.normalAxis === 'u' && Math.abs(inspectionPlane.constant - u) < 1e-10;
                     const mat = new THREE.MeshBasicMaterial({ 
                         color: isSelected ? 0xffc107 : 0xaaaaaa,  // Yellow if selected, red otherwise
@@ -2487,6 +2489,7 @@
                     sphere.userData.planeData = { normalAxis: 'w', constant: w };
                     scene.add(sphere);
                     inspectionPointsRef.current.push(sphere);
+                }
                 }
                 
                 // Draw inspection plane with actual meshface coverage (element-level cells)
@@ -2622,7 +2625,7 @@
                     }
                 }
 
-            }, [mesh, selectedBSpline, showMeshfaces, showGreville, showElements, showBSplineSupports, refinementPoints, refinementStart, showRefinementPoints, inspectionPlane]);
+            }, [mesh, selectedBSpline, showMeshfaces, showGreville, showElements, showBSplineSupports, refinementPoints, refinementStart, showRefinementPoints, inspectionPlane, showInspectionPoints]);
 
             return <div ref={containerRef} id="threejs-canvas" />;
         }
@@ -2646,6 +2649,7 @@
             const [showElements, setShowElements] = useState(true);
             const [showBSplineSupports, setShowBSplineSupports] = useState(false);
             const [showRefinementControls, setShowRefinementControls] = useState(false);
+            const [showInspectionPoints, setShowInspectionPoints] = useState(false);
             
             // Inspection plane state (for debugging meshface coverage)
             const [inspectionPlane, setInspectionPlane] = useState(null);
@@ -2871,6 +2875,46 @@
                         </div>
 
                         <div className="control-group">
+                            <button 
+                                onClick={() => {
+                                    const newState = !showInspectionPoints;
+                                    setShowInspectionPoints(newState);
+                                    if (!newState) {
+                                        setInspectionPlane(null);
+                                    }
+                                }}
+                                style={{ 
+                                    background: showInspectionPoints ? '#ffc107' : '#6c757d',
+                                    marginBottom: showInspectionPoints ? '10px' : '0'
+                                }}>
+                                {showInspectionPoints ? '▼ Inspection Mode (Active)' : '▶ Inspection Mode'}
+                            </button>
+                            
+                            {showInspectionPoints && inspectionPlane && (
+                                <div style={{ 
+                                    background: '#fff8e1', 
+                                    padding: '10px', 
+                                    borderRadius: '4px',
+                                    border: '1px solid #ffc107',
+                                    marginBottom: '10px'
+                                }}>
+                                    <div style={{ fontSize: '12px', color: '#666' }}>
+                                        Inspecting {inspectionPlane.normalAxis.toUpperCase()}-plane at {inspectionPlane.constant.toFixed(3)}
+                                    </div>
+                                    <button 
+                                        onClick={() => setInspectionPlane(null)}
+                                        style={{ 
+                                            fontSize: '12px', 
+                                            padding: '4px 8px',
+                                            marginTop: '5px'
+                                        }}>
+                                        Clear Plane
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="control-group">
                             <label>B-splines (click to select):</label>
                             <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
                                 {mesh.bsplines.map(bspline => (
@@ -2908,6 +2952,7 @@
                             showRefinementPoints={showRefinementControls}
                             inspectionPlane={inspectionPlane}
                             onInspectionClick={handleInspectionClick}
+                            showInspectionPoints={showInspectionPoints}
                         />
                     </div>
                 </div>
