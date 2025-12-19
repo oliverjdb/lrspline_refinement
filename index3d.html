@@ -462,18 +462,40 @@
             const keptCoplanar = [];
             
             // Try to merge with each coplanar face
-            // Two faces can merge if they share an edge (adjacent in one direction, same extent in other)
+            // Two faces can merge ONLY if they share a complete edge:
+            // - Same extent in one span direction AND adjacent/overlapping in the other, OR
+            // - One face completely contains the other
             for (const face of coplanar) {
                 const spans = face.getSpans();
                 
-                // Check if faces can be merged
-                // They must overlap or be adjacent in both span directions
-                const overlap1 = mergedSpan1Start <= spans.end1 + epsilon && 
-                                mergedSpan1End >= spans.start1 - epsilon;
-                const overlap2 = mergedSpan2Start <= spans.end2 + epsilon && 
-                                mergedSpan2End >= spans.start2 - epsilon;
+                // Check for complete edge sharing or containment
+                // Case 1: Same span1 extent, adjacent/overlapping in span2
+                const sameSpan1 = Math.abs(mergedSpan1Start - spans.start1) < epsilon &&
+                                 Math.abs(mergedSpan1End - spans.end1) < epsilon;
+                const adjacentSpan2 = mergedSpan2Start <= spans.end2 + epsilon && 
+                                     mergedSpan2End >= spans.start2 - epsilon;
                 
-                if (overlap1 && overlap2) {
+                // Case 2: Same span2 extent, adjacent/overlapping in span1
+                const sameSpan2 = Math.abs(mergedSpan2Start - spans.start2) < epsilon &&
+                                 Math.abs(mergedSpan2End - spans.end2) < epsilon;
+                const adjacentSpan1 = mergedSpan1Start <= spans.end1 + epsilon && 
+                                     mergedSpan1End >= spans.start1 - epsilon;
+                
+                // Case 3: One contains the other (subset case)
+                const newContainsOld = mergedSpan1Start <= spans.start1 + epsilon &&
+                                      mergedSpan1End >= spans.end1 - epsilon &&
+                                      mergedSpan2Start <= spans.start2 + epsilon &&
+                                      mergedSpan2End >= spans.end2 - epsilon;
+                const oldContainsNew = spans.start1 <= mergedSpan1Start + epsilon &&
+                                      spans.end1 >= mergedSpan1End - epsilon &&
+                                      spans.start2 <= mergedSpan2Start + epsilon &&
+                                      spans.end2 >= mergedSpan2End - epsilon;
+                
+                const canMerge = (sameSpan1 && adjacentSpan2) || 
+                                (sameSpan2 && adjacentSpan1) ||
+                                newContainsOld || oldContainsNew;
+                
+                if (canMerge) {
                     // Merge by taking the union
                     mergedSpan1Start = Math.min(mergedSpan1Start, spans.start1);
                     mergedSpan1End = Math.max(mergedSpan1End, spans.end1);
@@ -511,6 +533,160 @@
                 }
             }
             return count;
+        };
+
+        /**
+         * Check if two meshfaces are adjacent (share a complete edge)
+         * For proper LR-spline semantics, faces must share a complete edge to be connected:
+         * - Same extent in one span direction AND overlapping in the other, OR
+         * - One contains the other
+         */
+        const facesAreAdjacent = (face1, face2) => {
+            const epsilon = 1e-10;
+            const spans1 = face1.getSpans();
+            const spans2 = face2.getSpans();
+            
+            // Check for complete edge sharing
+            // Case 1: Same span1 extent, adjacent/overlapping in span2
+            const sameSpan1 = Math.abs(spans1.start1 - spans2.start1) < epsilon &&
+                             Math.abs(spans1.end1 - spans2.end1) < epsilon;
+            const adjacentSpan2 = spans1.start2 <= spans2.end2 + epsilon && 
+                                 spans1.end2 >= spans2.start2 - epsilon;
+            
+            // Case 2: Same span2 extent, adjacent/overlapping in span1
+            const sameSpan2 = Math.abs(spans1.start2 - spans2.start2) < epsilon &&
+                             Math.abs(spans1.end2 - spans2.end2) < epsilon;
+            const adjacentSpan1 = spans1.start1 <= spans2.end1 + epsilon && 
+                                 spans1.end1 >= spans2.start1 - epsilon;
+            
+            // Case 3: One contains the other (subset case)
+            const oneContainsOther = (
+                (spans1.start1 <= spans2.start1 + epsilon && spans1.end1 >= spans2.end1 - epsilon &&
+                 spans1.start2 <= spans2.start2 + epsilon && spans1.end2 >= spans2.end2 - epsilon) ||
+                (spans2.start1 <= spans1.start1 + epsilon && spans2.end1 >= spans1.end1 - epsilon &&
+                 spans2.start2 <= spans1.start2 + epsilon && spans2.end2 >= spans1.end2 - epsilon)
+            );
+            
+            return (sameSpan1 && adjacentSpan2) || (sameSpan2 && adjacentSpan1) || oneContainsOther;
+        };
+
+        /**
+         * Find connected components of coplanar meshfaces
+         * Returns array of arrays, each inner array is a connected component
+         */
+        const findConnectedFaceComponents = (faces) => {
+            if (faces.length === 0) return [];
+            
+            const visited = new Set();
+            const components = [];
+            
+            for (const face of faces) {
+                if (visited.has(face.id)) continue;
+                
+                // BFS to find all connected faces
+                const component = [];
+                const queue = [face];
+                visited.add(face.id);
+                
+                while (queue.length > 0) {
+                    const current = queue.shift();
+                    component.push(current);
+                    
+                    for (const other of faces) {
+                        if (!visited.has(other.id) && facesAreAdjacent(current, other)) {
+                            visited.add(other.id);
+                            queue.push(other);
+                        }
+                    }
+                }
+                
+                components.push(component);
+            }
+            
+            return components;
+        };
+
+        /**
+         * Compute the bounding box of a connected component of meshfaces
+         * Returns the union bounding box in span1 and span2 directions
+         */
+        const getComponentBoundingBox = (component) => {
+            if (component.length === 0) return null;
+            
+            const first = component[0].getSpans();
+            let minSpan1 = first.start1, maxSpan1 = first.end1;
+            let minSpan2 = first.start2, maxSpan2 = first.end2;
+            
+            for (const face of component) {
+                const spans = face.getSpans();
+                minSpan1 = Math.min(minSpan1, spans.start1);
+                maxSpan1 = Math.max(maxSpan1, spans.end1);
+                minSpan2 = Math.min(minSpan2, spans.start2);
+                maxSpan2 = Math.max(maxSpan2, spans.end2);
+            }
+            
+            return {
+                span1Start: minSpan1, span1End: maxSpan1,
+                span2Start: minSpan2, span2End: maxSpan2,
+                normalAxis: component[0].normalAxis,
+                constant: component[0].constant
+            };
+        };
+
+        /**
+         * Check if a connected component of meshfaces splits a B-spline
+         * The component splits a B-spline if:
+         * 1. The constant coordinate is strictly inside the B-spline's support
+         * 2. The component's bounding box spans the entire B-spline support in the other directions
+         * 3. The knot value doesn't already exist in the B-spline's local knot vector
+         */
+        const componentSplitsBSpline = (component, bspline, multiplicity = 1) => {
+            const epsilon = 1e-10;
+            const bbox = getComponentBoundingBox(component);
+            if (!bbox) return false;
+            
+            const support = bspline.getSupport();
+            const { normalAxis, constant, span1Start, span1End, span2Start, span2End } = bbox;
+            
+            if (normalAxis === 'u') {
+                const uInside = constant > support.uMin + epsilon && 
+                               constant < support.uMax - epsilon;
+                const vSpans = span1Start <= support.vMin + epsilon && 
+                              span1End >= support.vMax - epsilon;
+                const wSpans = span2Start <= support.wMin + epsilon && 
+                              span2End >= support.wMax - epsilon;
+                
+                if (!uInside || !vSpans || !wSpans) return false;
+                
+                const nKnots = countKnotInVector(bspline.knotsU, constant);
+                return nKnots < multiplicity;
+                
+            } else if (normalAxis === 'v') {
+                const vInside = constant > support.vMin + epsilon && 
+                               constant < support.vMax - epsilon;
+                const uSpans = span1Start <= support.uMin + epsilon && 
+                              span1End >= support.uMax - epsilon;
+                const wSpans = span2Start <= support.wMin + epsilon && 
+                              span2End >= support.wMax - epsilon;
+                
+                if (!vInside || !uSpans || !wSpans) return false;
+                
+                const nKnots = countKnotInVector(bspline.knotsV, constant);
+                return nKnots < multiplicity;
+                
+            } else { // normalAxis === 'w'
+                const wInside = constant > support.wMin + epsilon && 
+                               constant < support.wMax - epsilon;
+                const uSpans = span1Start <= support.uMin + epsilon && 
+                              span1End >= support.uMax - epsilon;
+                const vSpans = span2Start <= support.vMin + epsilon && 
+                              span2End >= support.vMax - epsilon;
+                
+                if (!wInside || !uSpans || !vSpans) return false;
+                
+                const nKnots = countKnotInVector(bspline.knotsW, constant);
+                return nKnots < multiplicity;
+            }
         };
 
         /**
@@ -786,12 +962,168 @@
         }
 
         /**
+         * Get T-junction edges from meshfaces in 3D
+         * A T-junction occurs when a meshface edge doesn't extend to the domain boundary
+         * Returns points along these edges that can be used to extend the meshface
+         */
+        const getTJunctionPoints3D = (mesh, normalAxis) => {
+            const epsilon = 1e-10;
+            const points = [];
+            
+            const knotsU = Array.from(mesh.globalKnotsU).sort((a, b) => a - b);
+            const knotsV = Array.from(mesh.globalKnotsV).sort((a, b) => a - b);
+            const knotsW = Array.from(mesh.globalKnotsW).sort((a, b) => a - b);
+            
+            const pointExists = (u, v, w) => {
+                return points.some(p => 
+                    Math.abs(p.u - u) < epsilon && 
+                    Math.abs(p.v - v) < epsilon && 
+                    Math.abs(p.w - w) < epsilon
+                );
+            };
+            
+            // Find meshfaces with the specified normal axis that have T-junction edges
+            for (const face of mesh.meshfaces) {
+                if (face.normalAxis !== normalAxis) continue;
+                
+                if (normalAxis === 'u') {
+                    const u = face.constant;
+                    // Check V edges (at vStart and vEnd)
+                    // If vStart > 0, this is a T-junction edge - can extend downward in V
+                    if (face.vStart > epsilon) {
+                        // Points along this edge at W knot positions
+                        for (const w of knotsW) {
+                            if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                if (!pointExists(u, face.vStart, w)) {
+                                    points.push({ u, v: face.vStart, w, normalAxis: 'u', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    // If vEnd < 1, this is a T-junction edge - can extend upward in V
+                    if (face.vEnd < 1 - epsilon) {
+                        for (const w of knotsW) {
+                            if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                if (!pointExists(u, face.vEnd, w)) {
+                                    points.push({ u, v: face.vEnd, w, normalAxis: 'u', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    // Check W edges (at wStart and wEnd)
+                    if (face.wStart > epsilon) {
+                        for (const v of knotsV) {
+                            if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                if (!pointExists(u, v, face.wStart)) {
+                                    points.push({ u, v, w: face.wStart, normalAxis: 'u', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    if (face.wEnd < 1 - epsilon) {
+                        for (const v of knotsV) {
+                            if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                if (!pointExists(u, v, face.wEnd)) {
+                                    points.push({ u, v, w: face.wEnd, normalAxis: 'u', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                } else if (normalAxis === 'v') {
+                    const v = face.constant;
+                    // Check U edges
+                    if (face.uStart > epsilon) {
+                        for (const w of knotsW) {
+                            if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                if (!pointExists(face.uStart, v, w)) {
+                                    points.push({ u: face.uStart, v, w, normalAxis: 'v', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    if (face.uEnd < 1 - epsilon) {
+                        for (const w of knotsW) {
+                            if (w >= face.wStart - epsilon && w <= face.wEnd + epsilon) {
+                                if (!pointExists(face.uEnd, v, w)) {
+                                    points.push({ u: face.uEnd, v, w, normalAxis: 'v', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    // Check W edges
+                    if (face.wStart > epsilon) {
+                        for (const u of knotsU) {
+                            if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                if (!pointExists(u, v, face.wStart)) {
+                                    points.push({ u, v, w: face.wStart, normalAxis: 'v', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    if (face.wEnd < 1 - epsilon) {
+                        for (const u of knotsU) {
+                            if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                if (!pointExists(u, v, face.wEnd)) {
+                                    points.push({ u, v, w: face.wEnd, normalAxis: 'v', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                } else { // normalAxis === 'w'
+                    const w = face.constant;
+                    // Check U edges
+                    if (face.uStart > epsilon) {
+                        for (const v of knotsV) {
+                            if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                if (!pointExists(face.uStart, v, w)) {
+                                    points.push({ u: face.uStart, v, w, normalAxis: 'w', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    if (face.uEnd < 1 - epsilon) {
+                        for (const v of knotsV) {
+                            if (v >= face.vStart - epsilon && v <= face.vEnd + epsilon) {
+                                if (!pointExists(face.uEnd, v, w)) {
+                                    points.push({ u: face.uEnd, v, w, normalAxis: 'w', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    // Check V edges
+                    if (face.vStart > epsilon) {
+                        for (const u of knotsU) {
+                            if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                if (!pointExists(u, face.vStart, w)) {
+                                    points.push({ u, v: face.vStart, w, normalAxis: 'w', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                    if (face.vEnd < 1 - epsilon) {
+                        for (const u of knotsU) {
+                            if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
+                                if (!pointExists(u, face.vEnd, w)) {
+                                    points.push({ u, v: face.vEnd, w, normalAxis: 'w', isTJunction: true });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return points;
+        };
+
+        /**
          * Get valid start points for refinement in 3D
          * A valid start point is on an existing meshface where a new perpendicular meshface can begin
          * 
          * For a refinement with normal axis 'axis', valid start points are on meshfaces 
          * perpendicular to one of the OTHER two axes, at positions where the 'axis' coordinate
          * lies between existing knots.
+         * 
+         * Also includes T-junction points for extending existing local refinements.
          * 
          * Returns array of { u, v, w, normalAxis } where normalAxis is the axis for the new meshface
          */
@@ -935,6 +1267,114 @@
                                     if (u >= face.uStart - epsilon && u <= face.uEnd + epsilon) {
                                         if (!pointExists(u, v, w)) {
                                             points.push({ u, v, w, normalAxis: 'w' });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Add T-junction extension points from existing meshfaces of the selected normalAxis
+            // These points are on the edges of meshfaces that don't reach the boundary
+            const tJunctionPoints = getTJunctionPoints3D(mesh, normalAxis);
+            for (const tjPt of tJunctionPoints) {
+                if (!pointExists(tjPt.u, tjPt.v, tjPt.w)) {
+                    points.push(tjPt);
+                }
+            }
+            
+            // Helper: check if a plane at this constant is "incomplete" (non-tensor-product)
+            // i.e., the union of meshfaces on this plane doesn't cover the full domain [0,1]x[0,1]
+            const isPlaneIncomplete = (constant) => {
+                const facesOnPlane = mesh.meshfaces.filter(f => 
+                    f.normalAxis === normalAxis && Math.abs(f.constant - constant) < epsilon
+                );
+                if (facesOnPlane.length === 0) return false;
+                
+                // Check if any face doesn't span the full domain
+                for (const face of facesOnPlane) {
+                    const spans = face.getSpans();
+                    if (spans.start1 > epsilon || spans.end1 < 1 - epsilon ||
+                        spans.start2 > epsilon || spans.end2 < 1 - epsilon) {
+                        return true; // This face is incomplete
+                    }
+                }
+                return false; // All faces span the full domain
+            };
+            
+            // Only add plane corner points on INCOMPLETE planes (non-tensor-product)
+            // This allows extending local refinements but doesn't clutter tensor-product planes
+            const existingConstants = new Set();
+            for (const face of mesh.meshfaces) {
+                if (face.normalAxis === normalAxis) {
+                    existingConstants.add(face.constant);
+                }
+            }
+            
+            for (const constant of existingConstants) {
+                // Skip if this plane is already complete (tensor-product)
+                if (!isPlaneIncomplete(constant)) continue;
+                
+                // Find all valid corners on this plane (intersections of perpendicular faces)
+                if (normalAxis === 'u') {
+                    // For U-normal plane at u=constant, find V-W intersections
+                    for (const vFace of mesh.meshfaces) {
+                        if (vFace.normalAxis === 'v' && 
+                            constant >= vFace.uStart - epsilon && constant <= vFace.uEnd + epsilon) {
+                            const v = vFace.constant;
+                            for (const wFace of mesh.meshfaces) {
+                                if (wFace.normalAxis === 'w' &&
+                                    constant >= wFace.uStart - epsilon && constant <= wFace.uEnd + epsilon &&
+                                    v >= wFace.vStart - epsilon && v <= wFace.vEnd + epsilon) {
+                                    const w = wFace.constant;
+                                    // Check this point is within the V-face's W span
+                                    if (w >= vFace.wStart - epsilon && w <= vFace.wEnd + epsilon) {
+                                        if (!pointExists(constant, v, w)) {
+                                            points.push({ u: constant, v, w, normalAxis: 'u', isPlanePoint: true });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (normalAxis === 'v') {
+                    // For V-normal plane at v=constant, find U-W intersections
+                    for (const uFace of mesh.meshfaces) {
+                        if (uFace.normalAxis === 'u' &&
+                            constant >= uFace.vStart - epsilon && constant <= uFace.vEnd + epsilon) {
+                            const u = uFace.constant;
+                            for (const wFace of mesh.meshfaces) {
+                                if (wFace.normalAxis === 'w' &&
+                                    constant >= wFace.vStart - epsilon && constant <= wFace.vEnd + epsilon &&
+                                    u >= wFace.uStart - epsilon && u <= wFace.uEnd + epsilon) {
+                                    const w = wFace.constant;
+                                    // Check this point is within the U-face's W span
+                                    if (w >= uFace.wStart - epsilon && w <= uFace.wEnd + epsilon) {
+                                        if (!pointExists(u, constant, w)) {
+                                            points.push({ u, v: constant, w, normalAxis: 'v', isPlanePoint: true });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else { // normalAxis === 'w'
+                    // For W-normal plane at w=constant, find U-V intersections
+                    for (const uFace of mesh.meshfaces) {
+                        if (uFace.normalAxis === 'u' &&
+                            constant >= uFace.wStart - epsilon && constant <= uFace.wEnd + epsilon) {
+                            const u = uFace.constant;
+                            for (const vFace of mesh.meshfaces) {
+                                if (vFace.normalAxis === 'v' &&
+                                    constant >= vFace.wStart - epsilon && constant <= vFace.wEnd + epsilon &&
+                                    u >= vFace.uStart - epsilon && u <= vFace.uEnd + epsilon) {
+                                    const v = vFace.constant;
+                                    // Check this point is within the U-face's V span
+                                    if (v >= uFace.vStart - epsilon && v <= uFace.vEnd + epsilon) {
+                                        if (!pointExists(u, v, constant)) {
+                                            points.push({ u, v, w: constant, normalAxis: 'w', isPlanePoint: true });
                                         }
                                     }
                                 }
@@ -1122,13 +1562,60 @@
             for (let i = 0; i <= numElementsV; i++) knotsV.push(i / numElementsV);
             for (let i = 0; i <= numElementsW; i++) knotsW.push(i / numElementsW);
             
+            // meshCells stores element-level mesh coverage for each plane
+            // Key: "normalAxis_constant" (e.g., "u_0.5")
+            // Value: Set of cell keys "span1Start_span1End_span2Start_span2End"
+            const meshCells = new Map();
+            
+            // Create initial tensor-product meshfaces (full coverage on boundary planes)
+            // For boundary planes, all element cells are covered
             const meshfaces = [];
             let nextId = 0;
             
-            // Create meshfaces perpendicular to each axis
-            for (const u of knotsU) meshfaces.push(new Meshface('u', u, 0, 1, 0, 1, nextId++));
-            for (const v of knotsV) meshfaces.push(new Meshface('v', v, 0, 1, 0, 1, nextId++));
-            for (const w of knotsW) meshfaces.push(new Meshface('w', w, 0, 1, 0, 1, nextId++));
+            // U-perpendicular faces at each U knot
+            for (const u of knotsU) {
+                const key = `u_${u.toFixed(10)}`;
+                const cells = new Set();
+                // Full coverage: all V-W element cells
+                for (let j = 0; j < numElementsV; j++) {
+                    for (let k = 0; k < numElementsW; k++) {
+                        const cellKey = `${knotsV[j]}_${knotsV[j+1]}_${knotsW[k]}_${knotsW[k+1]}`;
+                        cells.add(cellKey);
+                    }
+                }
+                meshCells.set(key, cells);
+                meshfaces.push(new Meshface('u', u, 0, 1, 0, 1, nextId++));
+            }
+            
+            // V-perpendicular faces at each V knot
+            for (const v of knotsV) {
+                const key = `v_${v.toFixed(10)}`;
+                const cells = new Set();
+                // Full coverage: all U-W element cells
+                for (let i = 0; i < numElementsU; i++) {
+                    for (let k = 0; k < numElementsW; k++) {
+                        const cellKey = `${knotsU[i]}_${knotsU[i+1]}_${knotsW[k]}_${knotsW[k+1]}`;
+                        cells.add(cellKey);
+                    }
+                }
+                meshCells.set(key, cells);
+                meshfaces.push(new Meshface('v', v, 0, 1, 0, 1, nextId++));
+            }
+            
+            // W-perpendicular faces at each W knot
+            for (const w of knotsW) {
+                const key = `w_${w.toFixed(10)}`;
+                const cells = new Set();
+                // Full coverage: all U-V element cells
+                for (let i = 0; i < numElementsU; i++) {
+                    for (let j = 0; j < numElementsV; j++) {
+                        const cellKey = `${knotsU[i]}_${knotsU[i+1]}_${knotsV[j]}_${knotsV[j+1]}`;
+                        cells.add(cellKey);
+                    }
+                }
+                meshCells.set(key, cells);
+                meshfaces.push(new Meshface('w', w, 0, 1, 0, 1, nextId++));
+            }
             
             // Create B-splines
             const bsplines = [];
@@ -1164,6 +1651,7 @@
             
             return {
                 meshfaces, bsplines, elements,
+                meshCells,  // New: element-level mesh coverage
                 degreeU, degreeV, degreeW,
                 nextId,
                 globalKnotsU: new Set(knotsU),
@@ -1173,48 +1661,237 @@
         };
 
         /**
+         * Get all element cells that a meshface region covers
+         * Returns array of { span1Start, span1End, span2Start, span2End }
+         */
+        const getMeshfaceCells = (mesh, normalAxis, constant, span1Start, span1End, span2Start, span2End) => {
+            const epsilon = 1e-10;
+            const cells = [];
+            
+            // Get the appropriate knot arrays for the two span directions
+            let knots1, knots2;
+            if (normalAxis === 'u') {
+                knots1 = Array.from(mesh.globalKnotsV).sort((a, b) => a - b);
+                knots2 = Array.from(mesh.globalKnotsW).sort((a, b) => a - b);
+            } else if (normalAxis === 'v') {
+                knots1 = Array.from(mesh.globalKnotsU).sort((a, b) => a - b);
+                knots2 = Array.from(mesh.globalKnotsW).sort((a, b) => a - b);
+            } else {
+                knots1 = Array.from(mesh.globalKnotsU).sort((a, b) => a - b);
+                knots2 = Array.from(mesh.globalKnotsV).sort((a, b) => a - b);
+            }
+            
+            // Find all element cells that overlap with the meshface region
+            for (let i = 0; i < knots1.length - 1; i++) {
+                const cellStart1 = knots1[i];
+                const cellEnd1 = knots1[i + 1];
+                
+                // Check if this cell overlaps with span1
+                if (cellEnd1 <= span1Start + epsilon || cellStart1 >= span1End - epsilon) continue;
+                
+                for (let j = 0; j < knots2.length - 1; j++) {
+                    const cellStart2 = knots2[j];
+                    const cellEnd2 = knots2[j + 1];
+                    
+                    // Check if this cell overlaps with span2
+                    if (cellEnd2 <= span2Start + epsilon || cellStart2 >= span2End - epsilon) continue;
+                    
+                    cells.push({
+                        span1Start: cellStart1, span1End: cellEnd1,
+                        span2Start: cellStart2, span2End: cellEnd2
+                    });
+                }
+            }
+            
+            return cells;
+        };
+
+        /**
+         * Check if mesh cells on a plane fully cover a B-spline's support
+         */
+        const meshCellsCoverBSpline = (mesh, normalAxis, constant, bspline) => {
+            const epsilon = 1e-10;
+            const support = bspline.getSupport();
+            
+            // Check if the constant is strictly inside the B-spline's support
+            if (normalAxis === 'u') {
+                if (constant <= support.uMin + epsilon || constant >= support.uMax - epsilon) return false;
+            } else if (normalAxis === 'v') {
+                if (constant <= support.vMin + epsilon || constant >= support.vMax - epsilon) return false;
+            } else {
+                if (constant <= support.wMin + epsilon || constant >= support.wMax - epsilon) return false;
+            }
+            
+            // Check if the knot already exists in the B-spline
+            if (normalAxis === 'u' && countKnotInVector(bspline.knotsU, constant) > 0) return false;
+            if (normalAxis === 'v' && countKnotInVector(bspline.knotsV, constant) > 0) return false;
+            if (normalAxis === 'w' && countKnotInVector(bspline.knotsW, constant) > 0) return false;
+            
+            // Get the mesh cells for this plane
+            const planeKey = `${normalAxis}_${constant.toFixed(10)}`;
+            const cells = mesh.meshCells.get(planeKey);
+            if (!cells || cells.size === 0) return false;
+            
+            // Determine the span ranges we need to cover based on B-spline support
+            let span1Min, span1Max, span2Min, span2Max;
+            if (normalAxis === 'u') {
+                span1Min = support.vMin; span1Max = support.vMax;
+                span2Min = support.wMin; span2Max = support.wMax;
+            } else if (normalAxis === 'v') {
+                span1Min = support.uMin; span1Max = support.uMax;
+                span2Min = support.wMin; span2Max = support.wMax;
+            } else {
+                span1Min = support.uMin; span1Max = support.uMax;
+                span2Min = support.vMin; span2Max = support.vMax;
+            }
+            
+            // Find all element cells that need to be covered
+            const requiredCells = getMeshfaceCells(mesh, normalAxis, constant, span1Min, span1Max, span2Min, span2Max);
+            
+            // Check if all required cells are present
+            for (const cell of requiredCells) {
+                const cellKey = `${cell.span1Start}_${cell.span1End}_${cell.span2Start}_${cell.span2End}`;
+                if (!cells.has(cellKey)) {
+                    return false;
+                }
+            }
+            
+            return true;
+        };
+
+        /**
          * Add a meshface and perform refinement
+         * This implements a two-step refinement process similar to the LRSplines library:
+         * Step 1: Split all existing B-splines that are traversed by the new/merged meshface
+         * Step 2: Check if any newly created B-splines need to be split by existing meshfaces
+         * Now uses element-level mesh cell storage for clean coverage checks
          */
         const addMeshface = (mesh, normalAxis, constant, span1Start, span1End, span2Start, span2End) => {
             const epsilon = 1e-10;
             const newMesh = { ...mesh };
             
-            // Create new meshface
-            const newFace = new Meshface(normalAxis, constant, span1Start, span1End, span2Start, span2End, newMesh.nextId++);
-            newMesh.meshfaces = [...mesh.meshfaces, newFace];
+            // Clone the meshCells map
+            newMesh.meshCells = new Map(mesh.meshCells);
             
-            // Update global knots
+            // Update global knots first (needed for cell calculation)
             if (normalAxis === 'u') newMesh.globalKnotsU = new Set([...mesh.globalKnotsU, constant]);
             else if (normalAxis === 'v') newMesh.globalKnotsV = new Set([...mesh.globalKnotsV, constant]);
             else newMesh.globalKnotsW = new Set([...mesh.globalKnotsW, constant]);
             
-            // Split B-splines
-            let currentBSplines = [...mesh.bsplines];
-            let newlyCreated = [];
+            // Get the cells covered by this new meshface
+            const newCells = getMeshfaceCells(newMesh, normalAxis, constant, span1Start, span1End, span2Start, span2End);
             
-            for (const bspline of currentBSplines) {
-                if (meshfaceSplitsBSpline(newFace, bspline)) {
-                    newlyCreated.push(...splitBSplineByMeshface(bspline, newFace));
+            // Add cells to the mesh cell storage (only new ones)
+            const planeKey = `${normalAxis}_${constant.toFixed(10)}`;
+            if (!newMesh.meshCells.has(planeKey)) {
+                newMesh.meshCells.set(planeKey, new Set());
+            }
+            const planeCells = newMesh.meshCells.get(planeKey);
+            
+            let addedAnyCells = false;
+            for (const cell of newCells) {
+                const cellKey = `${cell.span1Start}_${cell.span1End}_${cell.span2Start}_${cell.span2End}`;
+                if (!planeCells.has(cellKey)) {
+                    planeCells.add(cellKey);
+                    addedAnyCells = true;
                 }
             }
             
-            const unsplit = currentBSplines.filter(b => !meshfaceSplitsBSpline(newFace, b));
+            // If no new cells were added, nothing to do
+            if (!addedAnyCells) {
+                return mesh;  // Return original mesh unchanged
+            }
             
-            // Check new B-splines against existing meshfaces
+            // We still maintain meshfaces for visualization, but these are now derived from cells
+            // For now, keep the meshface list as-is (we could optimize this later)
+            const mergeResult = mergeOrAddMeshface(
+                mesh.meshfaces,
+                normalAxis,
+                constant,
+                span1Start,
+                span1End,
+                span2Start,
+                span2End,
+                newMesh.nextId
+            );
+            
+            newMesh.meshfaces = mergeResult.meshfaces;
+            if (mergeResult.wasNewFace) {
+                newMesh.nextId++;
+            }
+            
+            // STEP 1: Split all existing B-splines that have full mesh cell coverage
+            let currentBSplines = [...mesh.bsplines];
+            let newlyCreated = [];
+            let splitBSplineIds = new Set();
+            
+            for (const bspline of currentBSplines) {
+                if (meshCellsCoverBSpline(newMesh, normalAxis, constant, bspline)) {
+                    // Create a virtual face spanning the B-spline's support for splitting
+                    const support = bspline.getSupport();
+                    let virtSpan1Start, virtSpan1End, virtSpan2Start, virtSpan2End;
+                    if (normalAxis === 'u') {
+                        virtSpan1Start = support.vMin; virtSpan1End = support.vMax;
+                        virtSpan2Start = support.wMin; virtSpan2End = support.wMax;
+                    } else if (normalAxis === 'v') {
+                        virtSpan1Start = support.uMin; virtSpan1End = support.uMax;
+                        virtSpan2Start = support.wMin; virtSpan2End = support.wMax;
+                    } else {
+                        virtSpan1Start = support.uMin; virtSpan1End = support.uMax;
+                        virtSpan2Start = support.vMin; virtSpan2End = support.vMax;
+                    }
+                    const virtualFace = new Meshface(
+                        normalAxis, constant,
+                        virtSpan1Start, virtSpan1End,
+                        virtSpan2Start, virtSpan2End,
+                        -1
+                    );
+                    newlyCreated.push(...splitBSplineByMeshface(bspline, virtualFace));
+                    splitBSplineIds.add(bspline.id);
+                }
+            }
+            
+            const unsplit = currentBSplines.filter(b => !splitBSplineIds.has(b.id));
+            
+            // STEP 2: Check if any newly created B-splines need to be split by existing mesh cell coverage
             let splitsOccurred = true;
             while (splitsOccurred) {
                 splitsOccurred = false;
                 const nextNew = [];
                 for (const bspline of newlyCreated) {
                     let wasSplit = false;
-                    for (const face of newMesh.meshfaces) {
-                        if (meshfaceSplitsBSpline(face, bspline)) {
-                            nextNew.push(...splitBSplineByMeshface(bspline, face));
+                    
+                    // Check all planes in meshCells
+                    for (const [planeKeyStr, cells] of newMesh.meshCells) {
+                        const [axis, constStr] = planeKeyStr.split('_');
+                        const constVal = parseFloat(constStr);
+                        
+                        if (meshCellsCoverBSpline(newMesh, axis, constVal, bspline)) {
+                            const support = bspline.getSupport();
+                            let virtSpan1Start, virtSpan1End, virtSpan2Start, virtSpan2End;
+                            if (axis === 'u') {
+                                virtSpan1Start = support.vMin; virtSpan1End = support.vMax;
+                                virtSpan2Start = support.wMin; virtSpan2End = support.wMax;
+                            } else if (axis === 'v') {
+                                virtSpan1Start = support.uMin; virtSpan1End = support.uMax;
+                                virtSpan2Start = support.wMin; virtSpan2End = support.wMax;
+                            } else {
+                                virtSpan1Start = support.uMin; virtSpan1End = support.uMax;
+                                virtSpan2Start = support.vMin; virtSpan2End = support.vMax;
+                            }
+                            const virtualFace = new Meshface(
+                                axis, constVal,
+                                virtSpan1Start, virtSpan1End,
+                                virtSpan2Start, virtSpan2End,
+                                -1
+                            );
+                            nextNew.push(...splitBSplineByMeshface(bspline, virtualFace));
                             wasSplit = true;
                             splitsOccurred = true;
                             break;
                         }
                     }
+                    
                     if (!wasSplit) nextNew.push(bspline);
                 }
                 newlyCreated = nextNew;
@@ -1222,12 +1899,13 @@
             
             newMesh.bsplines = removeDuplicateBSplines3D([...unsplit, ...newlyCreated]);
             
-            // Split elements
-            const newElements = [];
+            // Split elements by the new meshface
+            const nextElements = [];
             for (const element of mesh.elements) {
-                newElements.push(...element.splitByMeshface(newFace));
+                const face = new Meshface(normalAxis, constant, span1Start, span1End, span2Start, span2End, -1);
+                nextElements.push(...element.splitByMeshface(face));
             }
-            newMesh.elements = newElements;
+            newMesh.elements = nextElements;
             
             return newMesh;
         };
@@ -1246,7 +1924,9 @@
             refinementStart,
             onPointClick,
             onGrevilleClick,
-            showRefinementPoints
+            showRefinementPoints,
+            inspectionPlane,
+            onInspectionClick
         }) {
             const containerRef = useRef(null);
             const sceneRef = useRef(null);
@@ -1255,6 +1935,7 @@
             const controlsRef = useRef(null);
             const clickablePointsRef = useRef([]);
             const grevillePointsRef = useRef([]);
+            const inspectionPointsRef = useRef([]);
 
             useEffect(() => {
                 if (!containerRef.current) return;
@@ -1349,6 +2030,18 @@
                         }
                     }
                     
+                    // Check inspection points
+                    if (inspectionPointsRef.current.length > 0) {
+                        const intersects = raycaster.intersectObjects(inspectionPointsRef.current);
+                        if (intersects.length > 0) {
+                            const planeData = intersects[0].object.userData.planeData;
+                            if (planeData && onInspectionClick) {
+                                onInspectionClick(planeData);
+                                return;
+                            }
+                        }
+                    }
+                    
                     // Then check Greville points
                     if (showGreville && grevillePointsRef.current.length > 0) {
                         const intersects = raycaster.intersectObjects(grevillePointsRef.current);
@@ -1378,6 +2071,15 @@
                         }
                     }
                     
+                    // Check inspection points
+                    if (inspectionPointsRef.current.length > 0) {
+                        const intersects = raycaster.intersectObjects(inspectionPointsRef.current);
+                        if (intersects.length > 0) {
+                            rendererRef.current.domElement.style.cursor = 'pointer';
+                            return;
+                        }
+                    }
+                    
                     // Then check Greville points
                     if (showGreville && grevillePointsRef.current.length > 0) {
                         const intersects = raycaster.intersectObjects(grevillePointsRef.current);
@@ -1399,7 +2101,7 @@
                         rendererRef.current.domElement.removeEventListener('mousemove', handleMouseMove);
                     }
                 };
-            }, [showRefinementPoints, showGreville, onPointClick, onGrevilleClick]);
+            }, [showRefinementPoints, showGreville, onPointClick, onGrevilleClick, onInspectionClick]);
 
             // Update visualization when mesh changes
             useEffect(() => {
@@ -1414,6 +2116,7 @@
                 toRemove.forEach(obj => scene.remove(obj));
                 clickablePointsRef.current = [];
                 grevillePointsRef.current = [];
+                inspectionPointsRef.current = [];
 
                 // Draw bounding box
                 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -1693,10 +2396,13 @@
                             Math.abs(point.v - refinementStart.v) < 1e-10 &&
                             Math.abs(point.w - refinementStart.w) < 1e-10;
                         
+                        // Simple color scheme: blue for available points, red for selected
+                        const color = isStartPoint ? 0xdc3545 : 0x007acc;
+                        
                         const mat = new THREE.MeshBasicMaterial({ 
-                            color: isStartPoint ? 0xdc3545 : 0x007acc,
+                            color: color,
                             transparent: true,
-                            opacity: isStartPoint ? 1.0 : 0.6,
+                            opacity: isStartPoint ? 1.0 : 0.7,
                             depthTest: false  // Always render on top
                         });
                         const sphere = new THREE.Mesh(pointSphereGeo, mat);
@@ -1723,7 +2429,200 @@
                     }
                 }
 
-            }, [mesh, selectedBSpline, showMeshfaces, showGreville, showElements, showBSplineSupports, refinementPoints, refinementStart, showRefinementPoints]);
+                // Draw inspection points outside the cube (one for each unique constant per axis)
+                const inspectionOffset = -0.04;
+                const inspSphereGeo = new THREE.SphereGeometry(0.009, 12, 12);
+                
+                // Get unique constants for each axis
+                const uniqueU = new Set(), uniqueV = new Set(), uniqueW = new Set();
+                for (const face of mesh.meshfaces) {
+                    if (face.normalAxis === 'u') uniqueU.add(face.constant);
+                    else if (face.normalAxis === 'v') uniqueV.add(face.constant);
+                    else uniqueW.add(face.constant);
+                }
+                
+                // Draw U-normal plane inspection points at (u, offset, offset)
+                for (const u of uniqueU) {
+                    const isSelected = inspectionPlane && inspectionPlane.normalAxis === 'u' && Math.abs(inspectionPlane.constant - u) < 1e-10;
+                    const mat = new THREE.MeshBasicMaterial({ 
+                        color: isSelected ? 0xffc107 : 0xaaaaaa,  // Yellow if selected, red otherwise
+                        transparent: true,
+                        opacity: 0.9
+                    });
+                    const sphere = new THREE.Mesh(inspSphereGeo, mat);
+                    sphere.position.set(u, inspectionOffset, inspectionOffset);
+                    sphere.userData.isMeshObject = true;
+                    sphere.userData.planeData = { normalAxis: 'u', constant: u };
+                    scene.add(sphere);
+                    inspectionPointsRef.current.push(sphere);
+                }
+                
+                // Draw V-normal plane inspection points at (offset, v, offset)
+                for (const v of uniqueV) {
+                    const isSelected = inspectionPlane && inspectionPlane.normalAxis === 'v' && Math.abs(inspectionPlane.constant - v) < 1e-10;
+                    const mat = new THREE.MeshBasicMaterial({ 
+                        color: isSelected ? 0xffc107 : 0xaaaaaa,  // Yellow if selected, green otherwise
+                        transparent: true,
+                        opacity: 0.9
+                    });
+                    const sphere = new THREE.Mesh(inspSphereGeo, mat);
+                    sphere.position.set(inspectionOffset, v, inspectionOffset);
+                    sphere.userData.isMeshObject = true;
+                    sphere.userData.planeData = { normalAxis: 'v', constant: v };
+                    scene.add(sphere);
+                    inspectionPointsRef.current.push(sphere);
+                }
+                
+                // Draw W-normal plane inspection points at (offset, offset, w)
+                for (const w of uniqueW) {
+                    const isSelected = inspectionPlane && inspectionPlane.normalAxis === 'w' && Math.abs(inspectionPlane.constant - w) < 1e-10;
+                    const mat = new THREE.MeshBasicMaterial({ 
+                        color: isSelected ? 0xffc107 : 0xaaaaaa,  // Yellow if selected, blue otherwise
+                        transparent: true,
+                        opacity: 0.9
+                    });
+                    const sphere = new THREE.Mesh(inspSphereGeo, mat);
+                    sphere.position.set(inspectionOffset, inspectionOffset, w);
+                    sphere.userData.isMeshObject = true;
+                    sphere.userData.planeData = { normalAxis: 'w', constant: w };
+                    scene.add(sphere);
+                    inspectionPointsRef.current.push(sphere);
+                }
+                
+                // Draw inspection plane with actual meshface coverage (element-level cells)
+                if (inspectionPlane) {
+                    const { normalAxis, constant } = inspectionPlane;
+                    const epsilon = 1e-10;
+                    
+                    // Get mesh cells for this plane
+                    const planeKey = `${normalAxis}_${constant.toFixed(10)}`;
+                    const cells = mesh.meshCells ? mesh.meshCells.get(planeKey) : null;
+                    
+                    // Draw semi-transparent plane background
+                    const planeMat = new THREE.MeshBasicMaterial({
+                        color: 0x888888,
+                        transparent: true,
+                        opacity: 0.2,
+                        side: THREE.DoubleSide,
+                        depthWrite: false
+                    });
+                    
+                    let planeGeo;
+                    if (normalAxis === 'u') {
+                        planeGeo = new THREE.PlaneGeometry(1, 1);
+                        planeGeo.rotateY(Math.PI / 2);
+                        planeGeo.translate(constant, 0.5, 0.5);
+                    } else if (normalAxis === 'v') {
+                        planeGeo = new THREE.PlaneGeometry(1, 1);
+                        planeGeo.rotateX(-Math.PI / 2);
+                        planeGeo.translate(0.5, constant, 0.5);
+                    } else {
+                        planeGeo = new THREE.PlaneGeometry(1, 1);
+                        planeGeo.translate(0.5, 0.5, constant);
+                    }
+                    
+                    const planeMesh = new THREE.Mesh(planeGeo, planeMat);
+                    planeMesh.userData.isMeshObject = true;
+                    planeMesh.renderOrder = 100;
+                    scene.add(planeMesh);
+                    
+                    // Draw each mesh cell as a filled rectangle (shaded)
+                    // Now using element-level cells to avoid double-counting
+                    if (cells) {
+                        const faceMat = new THREE.MeshBasicMaterial({
+                            color: 0x4CAF50,  // Green for covered area
+                            transparent: true,
+                            opacity: 0.5,
+                            side: THREE.DoubleSide,
+                            depthWrite: false
+                        });
+                        
+                        for (const cellKey of cells) {
+                            // Parse cell key: "span1Start_span1End_span2Start_span2End"
+                            const parts = cellKey.split('_').map(parseFloat);
+                            const span1Start = parts[0];
+                            const span1End = parts[1];
+                            const span2Start = parts[2];
+                            const span2End = parts[3];
+                            
+                            const width = span1End - span1Start;
+                            const height = span2End - span2Start;
+                            
+                            let faceGeo;
+                            if (normalAxis === 'u') {
+                                // V-W plane
+                                faceGeo = new THREE.PlaneGeometry(height, width);  // Note: swapped for correct orientation
+                                faceGeo.rotateY(Math.PI / 2);
+                                faceGeo.translate(constant, span1Start + width/2, span2Start + height/2);
+                            } else if (normalAxis === 'v') {
+                                // U-W plane
+                                faceGeo = new THREE.PlaneGeometry(width, height);
+                                faceGeo.rotateX(-Math.PI / 2);
+                                faceGeo.translate(span1Start + width/2, constant, span2Start + height/2);
+                            } else {
+                                // U-V plane
+                                faceGeo = new THREE.PlaneGeometry(width, height);
+                                faceGeo.translate(span1Start + width/2, span2Start + height/2, constant);
+                            }
+                            
+                            const faceMesh = new THREE.Mesh(faceGeo, faceMat);
+                            faceMesh.userData.isMeshObject = true;
+                            faceMesh.renderOrder = 101;
+                            scene.add(faceMesh);
+                        }
+                    }
+                    
+                    // Draw element grid lines on the inspection plane
+                    const gridLineMat = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 1 });
+                    const gridPoints = [];
+                    
+                    mesh.elements.forEach(el => {
+                        if (normalAxis === 'u') {
+                            if (constant >= el.uMin - epsilon && constant <= el.uMax + epsilon) {
+                                gridPoints.push(new THREE.Vector3(constant, el.vMin, el.wMin));
+                                gridPoints.push(new THREE.Vector3(constant, el.vMin, el.wMax));
+                                gridPoints.push(new THREE.Vector3(constant, el.vMax, el.wMin));
+                                gridPoints.push(new THREE.Vector3(constant, el.vMax, el.wMax));
+                                gridPoints.push(new THREE.Vector3(constant, el.vMin, el.wMin));
+                                gridPoints.push(new THREE.Vector3(constant, el.vMax, el.wMin));
+                                gridPoints.push(new THREE.Vector3(constant, el.vMin, el.wMax));
+                                gridPoints.push(new THREE.Vector3(constant, el.vMax, el.wMax));
+                            }
+                        } else if (normalAxis === 'v') {
+                            if (constant >= el.vMin - epsilon && constant <= el.vMax + epsilon) {
+                                gridPoints.push(new THREE.Vector3(el.uMin, constant, el.wMin));
+                                gridPoints.push(new THREE.Vector3(el.uMin, constant, el.wMax));
+                                gridPoints.push(new THREE.Vector3(el.uMax, constant, el.wMin));
+                                gridPoints.push(new THREE.Vector3(el.uMax, constant, el.wMax));
+                                gridPoints.push(new THREE.Vector3(el.uMin, constant, el.wMin));
+                                gridPoints.push(new THREE.Vector3(el.uMax, constant, el.wMin));
+                                gridPoints.push(new THREE.Vector3(el.uMin, constant, el.wMax));
+                                gridPoints.push(new THREE.Vector3(el.uMax, constant, el.wMax));
+                            }
+                        } else {
+                            if (constant >= el.wMin - epsilon && constant <= el.wMax + epsilon) {
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMin, constant));
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMax, constant));
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMin, constant));
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMax, constant));
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMin, constant));
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMin, constant));
+                                gridPoints.push(new THREE.Vector3(el.uMin, el.vMax, constant));
+                                gridPoints.push(new THREE.Vector3(el.uMax, el.vMax, constant));
+                            }
+                        }
+                    });
+                    
+                    if (gridPoints.length > 0) {
+                        const gridGeometry = new THREE.BufferGeometry().setFromPoints(gridPoints);
+                        const gridLines = new THREE.LineSegments(gridGeometry, gridLineMat);
+                        gridLines.userData.isMeshObject = true;
+                        gridLines.renderOrder = 102;
+                        scene.add(gridLines);
+                    }
+                }
+
+            }, [mesh, selectedBSpline, showMeshfaces, showGreville, showElements, showBSplineSupports, refinementPoints, refinementStart, showRefinementPoints, inspectionPlane]);
 
             return <div ref={containerRef} id="threejs-canvas" />;
         }
@@ -1747,6 +2646,9 @@
             const [showElements, setShowElements] = useState(true);
             const [showBSplineSupports, setShowBSplineSupports] = useState(false);
             const [showRefinementControls, setShowRefinementControls] = useState(false);
+            
+            // Inspection plane state (for debugging meshface coverage)
+            const [inspectionPlane, setInspectionPlane] = useState(null);
             
             // Refinement state
             const [refAxis, setRefAxis] = useState('u');
@@ -1830,6 +2732,17 @@
             const handleCancelRefinement = () => {
                 setRefinementStart(null);
             };
+            
+            const handleInspectionClick = (planeData) => {
+                // Toggle inspection plane - click same plane to dismiss
+                if (inspectionPlane && 
+                    inspectionPlane.normalAxis === planeData.normalAxis &&
+                    Math.abs(inspectionPlane.constant - planeData.constant) < 1e-10) {
+                    setInspectionPlane(null);
+                } else {
+                    setInspectionPlane(planeData);
+                }
+            };
 
             const minElements = (deg) => deg + 1;
 
@@ -1839,7 +2752,7 @@
                         <h2>LR B-Spline 3D</h2>
                         
                         <div className="info">
-                            Click on Greville points (green) to select B-splines. Use mouse to rotate/zoom.
+                            Click Greville (green) to select B-splines. Click colored points outside cube to inspect meshface coverage on each plane.
                         </div>
 
                         <div className="stats">
@@ -1993,6 +2906,8 @@
                                 }
                             }}
                             showRefinementPoints={showRefinementControls}
+                            inspectionPlane={inspectionPlane}
+                            onInspectionClick={handleInspectionClick}
                         />
                     </div>
                 </div>
