@@ -2155,7 +2155,7 @@
                         const material = new THREE.MeshBasicMaterial({ 
                             color: 0x007acc, 
                             transparent: true, 
-                            opacity: 0.1, 
+                            opacity: inspectionPlane ? 0.03 : 0.1, 
                             side: THREE.DoubleSide 
                         });
                         const plane = new THREE.Mesh(geometry, material);
@@ -2165,7 +2165,11 @@
 
                         // Add edges
                         const edges = new THREE.EdgesGeometry(geometry);
-                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x007acc }));
+                        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ 
+                            color: 0x007acc,
+                            transparent: inspectionPlane ? true : false,
+                            opacity: inspectionPlane ? 0.1 : 1.0
+                        }));
                         line.position.copy(position);
                         line.userData.isMeshObject = true;
                         scene.add(line);
@@ -2182,8 +2186,8 @@
                         const edges = new THREE.EdgesGeometry(geo);
                         const lineMat = new THREE.LineBasicMaterial({ 
                             color: 0x999999,
-                            transparent: refinementStart ? true : false,
-                            opacity: refinementStart ? 0.1 : 1.0
+                            transparent: (refinementStart || inspectionPlane) ? true : false,
+                            opacity: (refinementStart || inspectionPlane) ? 0.1 : 1.0
                         });
                         const line = new THREE.LineSegments(edges, lineMat);
                         line.position.set(
@@ -2214,7 +2218,7 @@
                         const mat = new THREE.MeshBasicMaterial({ 
                             color: 0xff6600, 
                             transparent: true, 
-                            opacity: refinementStart ? 0.05 : 0.3  // Very faint during refinement
+                            opacity: (refinementStart || inspectionPlane) ? 0.05 : 0.3  // Very faint during refinement or inspection
                         });
                         const box = new THREE.Mesh(geo, mat);
                         box.position.set(
@@ -2230,7 +2234,7 @@
                             color: 0xff6600, 
                             linewidth: 2,
                             transparent: true,
-                            opacity: refinementStart ? 0.1 : 1.0  // Faint during refinement
+                            opacity: (refinementStart || inspectionPlane) ? 0.1 : 1.0  // Faint during refinement or inspection
                         }));
                         line.position.copy(box.position);
                         line.userData.isMeshObject = true;
@@ -2242,7 +2246,7 @@
                         const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ 
                             color: 0x999999, 
                             transparent: true,
-                            opacity: 0.2
+                            opacity: inspectionPlane ? 0.05 : 0.2  // Even fainter during inspection
                         }));
                         line.position.set(
                             (support.uMin + support.uMax) / 2,
