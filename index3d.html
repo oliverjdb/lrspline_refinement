@@ -124,6 +124,34 @@
             margin: 0;
             font-weight: normal;
         }
+        .controls.hidden {
+            display: none;
+        }
+        .menu-toggle {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 40px;
+            height: 40px;
+            background: #007acc;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 1000;
+            transition: background 0.2s;
+        }
+        .menu-toggle:hover {
+            background: #005a9e;
+        }
+        .menu-toggle.menu-visible {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -2504,6 +2532,7 @@
             const [numElementsW, setNumElementsW] = useState(3);
             const [mesh, setMesh] = useState(() => createMesh3D(2, 2, 2, 3, 3, 3));
             const [selectedBSpline, setSelectedBSpline] = useState(null);
+            const [menuVisible, setMenuVisible] = useState(true);
             
             // Visualization toggles
             const [showMeshfaces, setShowMeshfaces] = useState(false);
@@ -2631,8 +2660,27 @@
 
             return (
                 <div className="container">
-                    <div className="controls">
-                        <h2>LR B-Spline 3D</h2>
+                    <button 
+                        className={`menu-toggle ${menuVisible ? 'menu-visible' : ''}`}
+                        onClick={() => setMenuVisible(true)}
+                        title="Show menu">
+                        ☰
+                    </button>
+                    <div className={`controls ${menuVisible ? '' : 'hidden'}`}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                            <h2 style={{ margin: 0 }}>LR B-Spline 3D</h2>
+                            <button 
+                                onClick={() => setMenuVisible(false)}
+                                style={{ 
+                                    width: 'auto', 
+                                    padding: '4px 12px', 
+                                    margin: 0,
+                                    fontSize: '18px'
+                                }}
+                                title="Hide menu (fullscreen)">
+                                ✕
+                            </button>
+                        </div>
                         
                         <div className="info">
                             Click Greville (green) to select B-splines. Click colored points outside cube to inspect meshface coverage on each plane.
