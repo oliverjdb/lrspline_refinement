@@ -2515,6 +2515,7 @@
             
             // Inspection plane state (for debugging meshface coverage)
             const [inspectionPlane, setInspectionPlane] = useState(null);
+            const [filterByInspectionPlane, setFilterByInspectionPlane] = useState(false);
             
             // Refinement state
             const [refAxis, setRefAxis] = useState('u');
@@ -2526,25 +2527,41 @@
                 refinementStart ? getValidEndPoints3D(mesh, refinementStart) : []
             ), [mesh, refinementStart]);
             
-            // Filter points by selected B-spline if one is selected
+            // Filter points by selected B-spline and/or inspection plane
             const filterPointsByBSpline = (points) => {
-                if (!selectedBSpline) return points;
-                const bspline = mesh.bsplines.find(b => b.id === selectedBSpline);
-                if (!bspline) return points;
-                const support = bspline.getSupport();
+                let filtered = points;
                 const epsilon = 1e-10;
-                return points.filter(p => 
-                    p.u >= support.uMin - epsilon && p.u <= support.uMax + epsilon &&
-                    p.v >= support.vMin - epsilon && p.v <= support.vMax + epsilon &&
-                    p.w >= support.wMin - epsilon && p.w <= support.wMax + epsilon
-                );
+                
+                // Filter by B-spline support if selected
+                if (selectedBSpline) {
+                    const bspline = mesh.bsplines.find(b => b.id === selectedBSpline);
+                    if (bspline) {
+                        const support = bspline.getSupport();
+                        filtered = filtered.filter(p => 
+                            p.u >= support.uMin - epsilon && p.u <= support.uMax + epsilon &&
+                            p.v >= support.vMin - epsilon && p.v <= support.vMax + epsilon &&
+                            p.w >= support.wMin - epsilon && p.w <= support.wMax + epsilon
+                        );
+                    }
+                }
+                
+                // Filter by inspection plane if enabled and selected
+                if (filterByInspectionPlane && inspectionPlane) {
+                    const { normalAxis, constant } = inspectionPlane;
+                    filtered = filtered.filter(p => {
+                        const pointConstant = normalAxis === 'u' ? p.u : (normalAxis === 'v' ? p.v : p.w);
+                        return Math.abs(pointConstant - constant) < epsilon;
+                    });
+                }
+                
+                return filtered;
             };
             
-            // Current points to display (filtered by B-spline if selected)
+            // Current points to display (filtered by B-spline and/or inspection plane if selected)
             const refinementPoints = useMemo(() => {
                 const points = refinementStart ? validEndPoints : validStartPoints;
                 return filterPointsByBSpline(points);
-            }, [refinementStart, validStartPoints, validEndPoints, selectedBSpline, mesh]);
+            }, [refinementStart, validStartPoints, validEndPoints, selectedBSpline, mesh, filterByInspectionPlane, inspectionPlane]);
 
             const handleReset = () => {
                 setMesh(createMesh3D(degreeU, degreeV, degreeW, numElementsU, numElementsV, numElementsW));
@@ -2760,15 +2777,19 @@
                                     border: '1px solid #ffc107',
                                     marginBottom: '10px'
                                 }}>
-                                    <div style={{ fontSize: '12px', color: '#666' }}>
+                                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
                                         Inspecting {inspectionPlane.normalAxis.toUpperCase()}-plane at {inspectionPlane.constant.toFixed(3)}
+                                    </div>
+                                    <div className="checkbox-group" style={{ marginBottom: '8px' }}>
+                                        <input type="checkbox" id="filterByPlane" checked={filterByInspectionPlane} 
+                                            onChange={(e) => setFilterByInspectionPlane(e.target.checked)} />
+                                        <label htmlFor="filterByPlane" style={{ fontSize: '12px' }}>Restrict refinements to this plane</label>
                                     </div>
                                     <button 
                                         onClick={() => setInspectionPlane(null)}
                                         style={{ 
                                             fontSize: '12px', 
-                                            padding: '4px 8px',
-                                            marginTop: '5px'
+                                            padding: '4px 8px'
                                         }}>
                                         Clear Plane
                                     </button>
